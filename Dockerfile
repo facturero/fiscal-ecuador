@@ -1,7 +1,10 @@
 FROM node:20-alpine AS builder
+
+ARG NODE_AUTH_TOKEN
+
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci
+RUN printf '@facturero:registry=https://npm.pkg.github.com\n//npm.pkg.github.com/:_authToken=%s\n' "$NODE_AUTH_TOKEN" > .npmrc && npm ci && rm -f .npmrc
 COPY . .
 RUN npm run build
 

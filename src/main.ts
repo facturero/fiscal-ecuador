@@ -4,7 +4,7 @@ import { sequelize } from './infrastructure/persistence/sequelize.js';
 import './infrastructure/persistence/models.js';
 import { createApp } from './interface/http/app.js';
 import { FiscalInvoiceModel } from './infrastructure/persistence/models.js';
-import { OutboxRelay } from './infrastructure/messaging/relay.js';
+import { OutboxRelay } from '@facturero/outbox-relay';
 import { startConsumers, reconciliationJob, reprocessInvoice } from './infrastructure/messaging/consumer.js';
 
 async function main(): Promise<void> {
@@ -37,8 +37,12 @@ async function main(): Promise<void> {
   console.log(`[fiscal-ecuador] corriendo en puerto ${config.PORT}`);
 
   if (config.RABBITMQ_URL) {
-    const relay = new OutboxRelay();
-    await relay.start(config.RABBITMQ_URL);
+    const relay = new OutboxRelay({
+      sequelize,
+      rabbitmqUrl: config.RABBITMQ_URL,
+      exchange: 'crm.events',
+    });
+    await relay.start();
     console.log('[fiscal-ecuador] OutboxRelay iniciado.');
   } else {
     console.log('[fiscal-ecuador] RABBITMQ_URL no configurado, outbox relay desactivado.');

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { FiscalInvoiceModel, CertificateModel, ProcessedEventModel, OutboxModel } from '../persistence/models.js';
+import { InboxConsumer, EventHandler } from '@facturero/outbox-relay';
+import { FiscalInvoiceModel, CertificateModel, OutboxModel } from '../persistence/models.js';
 import { HttpDocumentStorage } from '../http/document-storage.js';
 import { sendToSriReception, querySriAuthorization } from '../http/sri-client.js';
 import { buildAccessKey } from '../../domain/access-key.js';
@@ -11,8 +12,7 @@ import { HttpIdentificationTypeCatalog } from '../http/identification-type-catal
 import { HttpOrganizationCatalog } from '../http/organization-catalog.js';
 import type { InvoiceIssuedPayload } from '../../domain/types.js';
 import { config } from '../config.js';
-import type { ConsumeMessage } from 'amqplib';
-import amqp from 'amqplib';
+import { sequelize } from '../persistence/sequelize.js';
 
 const documentStorage = new HttpDocumentStorage(config.DOCUMENT_SERVICE_URL, config.INTERNAL_SERVICE_SECRET);
 const taxRateCatalog = new HttpTaxRateCatalog(config.TAX_SERVICE_URL);
@@ -20,10 +20,42 @@ const identificationTypeCatalog = new HttpIdentificationTypeCatalog(config.TAX_S
 const organizationCatalog = new HttpOrganizationCatalog(config.ORG_SERVICE_URL);
 
 export async function reprocessInvoice(payload: InvoiceIssuedPayload): Promise<void> {
-  await handleInvoiceIssuedCore(payload, undefined);
+  await handleInvoiceIssuedCore(payload);
 }
 
-async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload, eventId: string | undefined): Promise<void> {
+export const invoiceIssuedHandler: EventHandler = {
+  eventType: 'billing.invoice.issued',
+  async handle(payload: unknown): Promise<void> {
+    await handleInvoiceIssuedCore(payload as InvoiceIssuedPayload);
+  },
+};
+
+/**
+ * Escribe el evento fiscal en el outbox DENTRO de la misma transacción que la
+ * mutación de negocio, para que no queden eventos huérfanos si el proceso
+ * muere entre ambas escrituras.
+ */
+async function publishFiscalEventInTx(
+  fiscalInvoiceId: string,
+  status: string,
+  message: string,
+  tx: unknown,
+): Promise<void> {
+  await OutboxModel.create(
+    {
+      id: randomUUID(),
+      aggregate_type: 'fiscal_invoice',
+      aggregate_id: fiscalInvoiceId,
+      type: `fiscal.ec.invoice.${status}`,
+      payload: { fiscalInvoiceId, status, message },
+      occurred_at: new Date(),
+      processed_at: null,
+    },
+    { transaction: tx as never },
+  );
+}
+
+async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload): Promise<void> {
   if (payload.countryCode !== 'EC') {
     console.log(`[fiscal-ecuador] País ${payload.countryCode} ignorado, no es EC`);
     return;
@@ -48,22 +80,23 @@ async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload, eventId: s
 
   if (!certificate) {
     console.log(`[fiscal-ecuador] Sin certificado activo para org ${payload.organizationId}, factura queda en error`);
-    const fiscalId = randomUUID();
-    await FiscalInvoiceModel.create({
-      id: fiscalId,
-      organization_id: payload.organizationId,
-      billing_invoice_id: payload.invoiceId,
-      number: payload.number,
-      access_key: '',
-      status: 'error',
-      retry_count: 0,
-      last_error: 'Sin certificado activo',
-      original_payload: payload,
-      created_at: new Date(),
-      updated_at: new Date(),
+    await sequelize.transaction(async (tx) => {
+      const fiscalId = randomUUID();
+      await FiscalInvoiceModel.create({
+        id: fiscalId,
+        organization_id: payload.organizationId,
+        billing_invoice_id: payload.invoiceId,
+        number: payload.number,
+        access_key: '',
+        status: 'error',
+        retry_count: 0,
+        last_error: 'Sin certificado activo',
+        original_payload: payload,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }, { transaction: tx });
+      await publishFiscalEventInTx(fiscalId, 'error', 'Sin certificado activo', tx);
     });
-    await publishFiscalEvent(fiscalId, 'error', `Sin certificado activo`);
-    if (eventId) await recordProcessed(eventId);
     return;
   }
 
@@ -74,22 +107,23 @@ async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload, eventId: s
     console.log(`[fiscal-ecuador] .p12 descargado (${p12Buffer.length} bytes)`);
   } catch (downloadErr: any) {
     console.error(`[fiscal-ecuador] Error descargando .p12:`, downloadErr);
-    const fiscalId = randomUUID();
-    await FiscalInvoiceModel.create({
-      id: fiscalId,
-      organization_id: payload.organizationId,
-      billing_invoice_id: payload.invoiceId,
-      number: payload.number,
-      access_key: '',
-      status: 'error',
-      retry_count: 0,
-      last_error: `No se pudo leer el certificado: ${downloadErr.message}`,
-      original_payload: payload,
-      created_at: new Date(),
-      updated_at: new Date(),
+    await sequelize.transaction(async (tx) => {
+      const fiscalId = randomUUID();
+      await FiscalInvoiceModel.create({
+        id: fiscalId,
+        organization_id: payload.organizationId,
+        billing_invoice_id: payload.invoiceId,
+        number: payload.number,
+        access_key: '',
+        status: 'error',
+        retry_count: 0,
+        last_error: `No se pudo leer el certificado: ${downloadErr.message}`,
+        original_payload: payload,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }, { transaction: tx });
+      await publishFiscalEventInTx(fiscalId, 'error', 'Error descargando certificado', tx);
     });
-    await publishFiscalEvent(fiscalId, 'error', `Error descargando certificado`);
-    if (eventId) await recordProcessed(eventId);
     return;
   }
 
@@ -98,22 +132,23 @@ async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload, eventId: s
     certPassword = decryptPassword(certificate.password_encrypted, config.CERTIFICATE_MASTER_KEY);
   } catch (decryptErr: any) {
     console.error(`[fiscal-ecuador] Error descifrando contraseña del certificado:`, decryptErr);
-    const fiscalId = randomUUID();
-    await FiscalInvoiceModel.create({
-      id: fiscalId,
-      organization_id: payload.organizationId,
-      billing_invoice_id: payload.invoiceId,
-      number: payload.number,
-      access_key: '',
-      status: 'error',
-      retry_count: 0,
-      last_error: `Error descifrando contraseña del certificado`,
-      original_payload: payload,
-      created_at: new Date(),
-      updated_at: new Date(),
+    await sequelize.transaction(async (tx) => {
+      const fiscalId = randomUUID();
+      await FiscalInvoiceModel.create({
+        id: fiscalId,
+        organization_id: payload.organizationId,
+        billing_invoice_id: payload.invoiceId,
+        number: payload.number,
+        access_key: '',
+        status: 'error',
+        retry_count: 0,
+        last_error: 'Error descifrando contraseña del certificado',
+        original_payload: payload,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }, { transaction: tx });
+      await publishFiscalEventInTx(fiscalId, 'error', 'Error de descifrado', tx);
     });
-    await publishFiscalEvent(fiscalId, 'error', `Error de descifrado`);
-    if (eventId) await recordProcessed(eventId);
     return;
   }
 
@@ -188,22 +223,23 @@ async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload, eventId: s
     console.log(`[fiscal-ecuador] XML firmado correctamente, serial=${certSerial}`);
   } catch (signErr: any) {
     console.error(`[fiscal-ecuador] Error firmando XML:`, signErr);
-    const fiscalId = randomUUID();
-    await FiscalInvoiceModel.create({
-      id: fiscalId,
-      organization_id: payload.organizationId,
-      billing_invoice_id: payload.invoiceId,
-      number: payload.number,
-      access_key: accessKey,
-      status: 'error',
-      retry_count: 0,
-      last_error: `Error de firma: ${signErr.message}`,
-      original_payload: payload,
-      created_at: new Date(),
-      updated_at: new Date(),
+    await sequelize.transaction(async (tx) => {
+      const fiscalId = randomUUID();
+      await FiscalInvoiceModel.create({
+        id: fiscalId,
+        organization_id: payload.organizationId,
+        billing_invoice_id: payload.invoiceId,
+        number: payload.number,
+        access_key: accessKey,
+        status: 'error',
+        retry_count: 0,
+        last_error: `Error de firma: ${signErr.message}`,
+        original_payload: payload,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }, { transaction: tx });
+      await publishFiscalEventInTx(fiscalId, 'error', `Error de firma: ${signErr.message}`, tx);
     });
-    await publishFiscalEvent(fiscalId, 'error', `Error de firma: ${signErr.message}`);
-    if (eventId) await recordProcessed(eventId);
     return;
   }
 
@@ -243,61 +279,43 @@ async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload, eventId: s
     console.log(`[fiscal-ecuador] Respuesta recepción SRI: ${reception.estado}`);
 
     if (reception.estado === 'RECIBIDA') {
-      await FiscalInvoiceModel.update(
-        { status: 'sent', updated_at: new Date(), sri_response: reception as any },
-        { where: { id: fiscalId } },
-      );
-      await publishFiscalEvent(fiscalId, 'sent', 'Enviado al SRI, esperando autorización');
+      await sequelize.transaction(async (tx) => {
+        await FiscalInvoiceModel.update(
+          { status: 'sent', updated_at: new Date(), sri_response: reception as any },
+          { where: { id: fiscalId }, transaction: tx },
+        );
+        await publishFiscalEventInTx(fiscalId, 'sent', 'Enviado al SRI, esperando autorización', tx);
+      });
       console.log(`[fiscal-ecuador] Factura ${fiscalId} enviada al SRI, esperando autorización`);
     } else {
-      await FiscalInvoiceModel.update(
-        {
-          status: 'rejected',
-          updated_at: new Date(),
-          sri_response: reception as any,
-          last_error: reception.mensajes?.map(m => m.mensaje).join('; ') ?? 'Rechazada por SRI',
-        },
-        { where: { id: fiscalId } },
-      );
-      await publishFiscalEvent(fiscalId, 'rejected', reception.mensajes?.map(m => m.mensaje).join('; ') ?? 'Rechazada por SRI');
+      await sequelize.transaction(async (tx) => {
+        await FiscalInvoiceModel.update(
+          {
+            status: 'rejected',
+            updated_at: new Date(),
+            sri_response: reception as any,
+            last_error: reception.mensajes?.map((m: any) => m.mensaje).join('; ') ?? 'Rechazada por SRI',
+          },
+          { where: { id: fiscalId }, transaction: tx },
+        );
+        await publishFiscalEventInTx(
+          fiscalId,
+          'rejected',
+          reception.mensajes?.map((m: any) => m.mensaje).join('; ') ?? 'Rechazada por SRI',
+          tx,
+        );
+      });
       console.log(`[fiscal-ecuador] Factura ${fiscalId} rechazada por SRI en recepción`);
     }
   } catch (sriErr: any) {
     console.error(`[fiscal-ecuador] Error enviando a SRI:`, sriErr);
-    await FiscalInvoiceModel.update(
-      { status: 'error', updated_at: new Date(), last_error: `Error SRI recepción: ${sriErr.message}` },
-      { where: { id: fiscalId } },
-    );
-    await publishFiscalEvent(fiscalId, 'error', `Error SRI recepción: ${sriErr.message}`);
-  }
-
-  if (eventId) await recordProcessed(eventId);
-}
-
-async function publishFiscalEvent(fiscalInvoiceId: string, status: string, message: string): Promise<void> {
-  try {
-    await OutboxModel.create({
-      id: randomUUID(),
-      aggregate_type: 'fiscal_invoice',
-      aggregate_id: fiscalInvoiceId,
-      type: `fiscal.ec.invoice.${status}`,
-      payload: { fiscalInvoiceId, status, message },
-      occurred_at: new Date(),
-      processed_at: null,
+    await sequelize.transaction(async (tx) => {
+      await FiscalInvoiceModel.update(
+        { status: 'error', updated_at: new Date(), last_error: `Error SRI recepción: ${sriErr.message}` },
+        { where: { id: fiscalId }, transaction: tx },
+      );
+      await publishFiscalEventInTx(fiscalId, 'error', `Error SRI recepción: ${sriErr.message}`, tx);
     });
-  } catch (err) {
-    console.error(`[fiscal-ecuador] Error publicando evento fiscal.ec.invoice.${status}:`, err);
-  }
-}
-
-async function recordProcessed(eventId: string): Promise<void> {
-  try {
-    await ProcessedEventModel.findOrCreate({
-      where: { event_id: eventId },
-      defaults: { event_id: eventId, processed_at: new Date() },
-    });
-  } catch (err) {
-    console.error(`[fiscal-ecuador] Error registrando processed_event ${eventId}:`, err);
   }
 }
 
@@ -314,29 +332,33 @@ export async function reconciliationJob(): Promise<void> {
           console.log(`[fiscal-ecuador] Auth para ${invoice.access_key}: ${auth.estado}`);
 
           if (auth.estado === 'AUTORIZADO') {
-            await FiscalInvoiceModel.update(
-              {
-                status: 'authorized',
-                authorization_number: auth.numeroAutorizacion ?? null,
-                authorization_date: auth.fechaAutorizacion ? new Date(auth.fechaAutorizacion) : null,
-                sri_response: auth as any,
-                updated_at: new Date(),
-              },
-              { where: { id: invoice.id } },
-            );
-            await publishFiscalEvent(invoice.id, 'authorized', `Autorizado #${auth.numeroAutorizacion}`);
+            await sequelize.transaction(async (tx) => {
+              await FiscalInvoiceModel.update(
+                {
+                  status: 'authorized',
+                  authorization_number: auth.numeroAutorizacion ?? null,
+                  authorization_date: auth.fechaAutorizacion ? new Date(auth.fechaAutorizacion) : null,
+                  sri_response: auth as any,
+                  updated_at: new Date(),
+                },
+                { where: { id: invoice.id }, transaction: tx },
+              );
+              await publishFiscalEventInTx(invoice.id, 'authorized', `Autorizado #${auth.numeroAutorizacion}`, tx);
+            });
             console.log(`[fiscal-ecuador] Factura ${invoice.id} AUTORIZADA, #${auth.numeroAutorizacion}`);
           } else if (auth.estado === 'NO AUTORIZADO') {
-            await FiscalInvoiceModel.update(
-              {
-                status: 'rejected',
-                sri_response: auth as any,
-                last_error: auth.mensajes?.map(m => m.mensaje).join('; ') ?? 'No autorizada',
-                updated_at: new Date(),
-              },
-              { where: { id: invoice.id } },
-            );
-            await publishFiscalEvent(invoice.id, 'rejected', auth.mensajes?.map(m => m.mensaje).join('; ') ?? 'No autorizada');
+            await sequelize.transaction(async (tx) => {
+              await FiscalInvoiceModel.update(
+                {
+                  status: 'rejected',
+                  sri_response: auth as any,
+                  last_error: auth.mensajes?.map((m: any) => m.mensaje).join('; ') ?? 'No autorizada',
+                  updated_at: new Date(),
+                },
+                { where: { id: invoice.id }, transaction: tx },
+              );
+              await publishFiscalEventInTx(invoice.id, 'rejected', auth.mensajes?.map((m: any) => m.mensaje).join('; ') ?? 'No autorizada', tx);
+            });
             console.log(`[fiscal-ecuador] Factura ${invoice.id} NO AUTORIZADA`);
           }
         } catch (queryErr: any) {
@@ -351,11 +373,13 @@ export async function reconciliationJob(): Promise<void> {
       });
       for (const inv of stuckInvoices) {
         if (inv.retry_count >= 30) {
-          await FiscalInvoiceModel.update(
-            { status: 'error', last_error: 'Excedido límite de reintentos de reconciliación', updated_at: new Date() },
-            { where: { id: inv.id } },
-          );
-          await publishFiscalEvent(inv.id, 'error', 'Excedido límite de reintentos');
+          await sequelize.transaction(async (tx) => {
+            await FiscalInvoiceModel.update(
+              { status: 'error', last_error: 'Excedido límite de reintentos de reconciliación', updated_at: new Date() },
+              { where: { id: inv.id }, transaction: tx },
+            );
+            await publishFiscalEventInTx(inv.id, 'error', 'Excedido límite de reintentos', tx);
+          });
           console.error(`[fiscal-ecuador] ALERTA: Factura ${inv.id} excedió 30 intentos de reconciliación`);
         } else {
           await FiscalInvoiceModel.update(
@@ -377,38 +401,17 @@ export async function startConsumers(): Promise<void> {
   }
 
   try {
-    const connection = await amqp.connect(config.RABBITMQ_URL);
-    const channel = await connection.createChannel();
-    const exchange = 'crm.events';
-    await channel.assertExchange(exchange, 'topic', { durable: true });
-
-    const queue = 'fiscal-ecuador.invoices';
-    await channel.assertQueue(queue, { durable: true });
-    await channel.bindQueue(queue, exchange, 'billing.invoice.issued');
-
-    await channel.consume(queue, (msg) => {
-      if (!msg) return;
-      handleIncoming(msg, channel).catch((err) => {
-        console.error('[fiscal-ecuador] Error procesando mensaje:', err);
-        channel.nack(msg, false, true);
-      });
+    const consumer = new InboxConsumer({
+      sequelize,
+      rabbitmqUrl: config.RABBITMQ_URL,
+      exchange: 'crm.events',
+      queue: 'fiscal-ecuador.invoices',
+      bindings: ['billing.invoice.issued'],
+      handlers: [invoiceIssuedHandler],
     });
-
+    await consumer.start();
     console.log('[fiscal-ecuador] Consumidor de RabbitMQ iniciado.');
   } catch (err) {
     console.error('[fiscal-ecuador] Error al conectar consumidor con RabbitMQ:', err);
   }
-}
-
-async function handleIncoming(msg: ConsumeMessage, channel: amqp.Channel): Promise<void> {
-  const eventId = msg.properties.headers?.eventId as string | undefined;
-
-  if (eventId) {
-    const exists = await ProcessedEventModel.findByPk(eventId);
-    if (exists) { channel.ack(msg); return; }
-  }
-
-  const payload: InvoiceIssuedPayload = JSON.parse(msg.content.toString());
-  await handleInvoiceIssuedCore(payload, eventId);
-  channel.ack(msg);
 }

@@ -116,13 +116,23 @@ export class ProcessedEventModel extends Model<
   InferAttributes<ProcessedEventModel>,
   InferCreationAttributes<ProcessedEventModel>
 > {
-  declare event_id: string;
+  declare id: string;
+  declare event_type: string;
+  declare routing_key: string;
+  declare payload: unknown;
+  declare status: string;
+  declare last_error: string | null;
   declare processed_at: Date;
 }
 
 ProcessedEventModel.init(
   {
-    event_id: { type: DataTypes.CHAR(36), primaryKey: true },
+    id: { type: DataTypes.CHAR(36), primaryKey: true },
+    event_type: { type: DataTypes.STRING(100), allowNull: false },
+    routing_key: { type: DataTypes.STRING(200), allowNull: false },
+    payload: { type: DataTypes.JSON, allowNull: true },
+    status: { type: DataTypes.STRING(30), allowNull: false, defaultValue: 'processed' },
+    last_error: { type: DataTypes.TEXT, allowNull: true },
     processed_at: { type: DataTypes.DATE, allowNull: false },
   },
   { sequelize, tableName: 'processed_events', timestamps: false },

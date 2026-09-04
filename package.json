@@ -13,6 +13,7 @@
     "db:migrate:undo": "npx sequelize-cli --config sequelize.config.cjs db:migrate:undo"
   },
   "dependencies": {
+    "@facturero/outbox-relay": "^0.1.0",
     "@hono/node-server": "^1.13.0",
     "@hono/zod-validator": "^0.4.0",
     "amqplib": "^0.10.4",
