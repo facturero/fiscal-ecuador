@@ -73,6 +73,27 @@ async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload): Promise<v
     await existingInvoice.destroy();
   }
 
+  // `access_key` tiene UNIQUE constraint en la tabla (models.ts:33) — usar ''
+  // como placeholder en los tres registros de error de abajo hacía que SOLO
+  // la primera factura sin certificado (o con .p12 ilegible, etc.) de TODO el
+  // sistema se guardara: cualquier factura siguiente en el mismo caso violaba
+  // la unicidad y el INSERT fallaba en silencio (reintentaba 3 veces y
+  // escalaba a la cola de retry, sin dejar rastro visible). La clave de
+  // acceso no depende del certificado — se puede calcular igual con los
+  // datos que ya trae el payload, así que se genera aquí una vez y se
+  // reutiliza en los tres.
+  const earlyAccessKey = payload.issuerSnapshot
+    ? buildAccessKey({
+        issueDate: new Date(),
+        documentTypeCode: '01',
+        issuerRuc: payload.issuerSnapshot.taxId,
+        environment: config.SRI_ENVIRONMENT,
+        establishmentCode: payload.issuerSnapshot.establishmentCode ?? '001',
+        emissionPointCode: payload.issuerSnapshot.emissionPointCode ?? '001',
+        sequentialNumber: payload.sequentialNumber,
+      })
+    : (randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '')).slice(0, 49);
+
   const certificate = await CertificateModel.findOne({
     where: { organization_id: payload.organizationId, status: 'active' },
     order: [['created_at', 'DESC']],
@@ -87,7 +108,7 @@ async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload): Promise<v
         organization_id: payload.organizationId,
         billing_invoice_id: payload.invoiceId,
         number: payload.number,
-        access_key: '',
+        access_key: earlyAccessKey,
         status: 'error',
         retry_count: 0,
         last_error: 'Sin certificado activo',
@@ -114,7 +135,7 @@ async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload): Promise<v
         organization_id: payload.organizationId,
         billing_invoice_id: payload.invoiceId,
         number: payload.number,
-        access_key: '',
+        access_key: earlyAccessKey,
         status: 'error',
         retry_count: 0,
         last_error: `No se pudo leer el certificado: ${downloadErr.message}`,
@@ -139,7 +160,7 @@ async function handleInvoiceIssuedCore(payload: InvoiceIssuedPayload): Promise<v
         organization_id: payload.organizationId,
         billing_invoice_id: payload.invoiceId,
         number: payload.number,
-        access_key: '',
+        access_key: earlyAccessKey,
         status: 'error',
         retry_count: 0,
         last_error: 'Error descifrando contraseña del certificado',
