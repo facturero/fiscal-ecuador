@@ -122,4 +122,4 @@ jobs:
           export IMAGE_TAG=${{ github.sha }}
           envsubst < k8s/deployment.yaml | kubectl apply -f -
           kubectl apply -f k8s/service.yaml
-          kubectl rollout status deployment fiscal-ecuador-node
+          kubectl rollout status deployment fiscal-ecuador-node --timeout=180s
