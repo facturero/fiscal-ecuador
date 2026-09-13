@@ -2,7 +2,16 @@ export interface InvoiceIssuedPayload {
   invoiceId: string;
   number: string;
   sequentialNumber: string;
+  /**
+   * Momento de emisión en billing (ISO). Es la fecha legal del comprobante; los
+   * eventos anteriores no la traían y se cae a la hora de procesamiento.
+   */
+  issueDate?: string | null;
+  /** Código SRI de forma de pago (Tabla 24). Si falta, sale de la organización o `01`. */
+  paymentMethodCode?: string | null;
   organizationId: string;
+  /** Quien emitió; viaja en los eventos fiscales para que la campana sepa a quién avisar. */
+  userId?: string;
   countryCode: string;
   establishmentId: string;
   emissionPointId: string;
@@ -11,6 +20,8 @@ export interface InvoiceIssuedPayload {
     businessName: string;
     identification: string;
     identificationTypeId: string;
+    /** RUC, CEDULA, PASAPORTE... Lo manda billing desde que customer-service lo expone. */
+    identificationTypeCode?: string | null;
     email?: string | null;
     phone?: string | null;
     type: 'person' | 'company';
@@ -30,6 +41,8 @@ export interface InvoiceIssuedPayload {
   currencyCode: string;
   lines: Array<{
     productId: string;
+    /** SKU del producto; es lo que va en `codigoPrincipal` cuando existe. */
+    productCode?: string | null;
     description: string;
     quantity: number;
     unitPriceCents: number;
@@ -43,6 +56,16 @@ export interface InvoiceIssuedPayload {
       amountCents: number;
     }>;
   }>;
+}
+
+/** `billing.invoice.voided`. */
+export interface InvoiceVoidedPayload {
+  invoiceId: string;
+  number: string;
+  organizationId: string;
+  reason?: string | null;
+  voidedAt?: string | null;
+  userId?: string;
 }
 
 export interface CertificateInfo {

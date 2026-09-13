@@ -42,8 +42,13 @@ export function signXmlWithP12(unsignedXml: string, p12Buffer: Buffer, password:
 
   const signedPropertiesXml = buildSignedProperties(signingTime, certDigestValue, issuerName, serialNumber);
 
+  // El digest es del elemento referenciado (`#comprobante`), no del archivo:
+  // la canonicalización con la que el SRI lo verifica quita la declaración
+  // `<?xml ...?>`, así que hashearla daba un digest que nunca coincidía.
+  const rootStart = unsignedXml.indexOf('<factura');
+  if (rootStart === -1) throw new Error('No se encontró el elemento <factura> en el XML');
   const docMd = forge.md.sha256.create();
-  docMd.update(unsignedXml, 'utf8');
+  docMd.update(unsignedXml.slice(rootStart), 'utf8');
   const docDigest = forge.util.encode64(docMd.digest().getBytes());
 
   const spMd = forge.md.sha256.create();
@@ -55,17 +60,22 @@ export function signXmlWithP12(unsignedXml: string, p12Buffer: Buffer, password:
   const siMd = forge.md.sha256.create();
   siMd.update(signedInfoXml, 'utf8');
 
-  const signer = (forge as any).pki.rsa;
-  const signatureBytes = signer.sign(siMd, privateKey);
+  // RSASSA-PKCS1-v1_5 sobre SHA-256. Antes se llamaba `forge.pki.rsa.sign`, que
+  // no existe en node-forge: toda factura con certificado acababa en
+  // "Error de firma: signer.sign is not a function" y nunca llegaba al SRI.
+  const signatureBytes = (privateKey as forge.pki.rsa.PrivateKey).sign(siMd);
   const signatureValue = forge.util.encode64(signatureBytes);
 
   const signatureId = `Signature-${certSerial}`;
   const signatureXml = buildSignatureXml(signedInfoXml, signatureValue, signedPropertiesXml, certBase64, signatureId, certSerial);
 
-  const insertPoint = unsignedXml.indexOf('</factura>');
+  const insertPoint = unsignedXml.lastIndexOf('</factura>');
   if (insertPoint === -1) throw new Error('No se encontró cierre de <factura> en el XML');
 
-  const signedXml = unsignedXml.slice(0, insertPoint) + signatureXml + '\n' + unsignedXml.slice(insertPoint);
+  // Sin nada alrededor de la firma: el transform `enveloped-signature` quita
+  // solo el elemento <ds:Signature>, y un salto de línea añadido aquí se quedaba
+  // en el documento y cambiaba el digest respecto al que se firmó.
+  const signedXml = unsignedXml.slice(0, insertPoint) + signatureXml + unsignedXml.slice(insertPoint);
 
   return { signedXml, certificateSerial: certSerial };
 }
@@ -119,8 +129,17 @@ function formatXmlTime(date: Date): string {
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}Z`;
 }
 
+/**
+ * Se escribe ya en forma canónica (exc-c14n), porque se firma este texto tal
+ * cual y el verificador lo canonicaliza antes de comprobar: sin declaraciones
+ * de namespace que no se usan y con los atributos en orden alfabético.
+ *
+ * La referencia a SignedProperties lleva su transform exc-c14n explícito. Sin
+ * transforms, XMLDSig manda canonicalizar con C14N *inclusiva*, que arrastra el
+ * `xmlns:ds` del <ds:Signature> padre y cambia el digest.
+ */
 function buildSignedInfo(docDigest: string, spDigest: string): string {
-  return `<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#" xmlns:ec="http://www.sri.gob.ec/factura-electronica">
+  return `<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
       <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:CanonicalizationMethod>
       <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"></ds:SignatureMethod>
       <ds:Reference URI="#comprobante">
@@ -131,7 +150,10 @@ function buildSignedInfo(docDigest: string, spDigest: string): string {
         <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"></ds:DigestMethod>
         <ds:DigestValue>${docDigest}</ds:DigestValue>
       </ds:Reference>
-      <ds:Reference URI="#xadesSignedProperties" Type="http://uri.etsi.org/01903#SignedProperties">
+      <ds:Reference Type="http://uri.etsi.org/01903#SignedProperties" URI="#xadesSignedProperties">
+        <ds:Transforms>
+          <ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:Transform>
+        </ds:Transforms>
         <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"></ds:DigestMethod>
         <ds:DigestValue>${spDigest}</ds:DigestValue>
       </ds:Reference>
@@ -175,11 +197,10 @@ ${signedPropertiesXml}
     </ds:Signature>`;
 }
 
+/** Solo lo que la canonicalización deja escapado en texto; ver `invoice-xml-builder.ts`. */
 function escapeXml(str: string): string {
   return str
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
+    .replace(/>/g, '&gt;');
 }

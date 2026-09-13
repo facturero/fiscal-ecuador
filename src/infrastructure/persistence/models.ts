@@ -11,15 +11,18 @@ export class FiscalInvoiceModel extends Model<
   declare organization_id: string;
   declare billing_invoice_id: string;
   declare number: string;
-  declare access_key: string;
+  declare access_key: string | null;
   declare status: 'pending' | 'sent' | 'authorized' | 'rejected' | 'error';
   declare authorization_number: string | null;
   declare authorization_date: Date | null;
   declare sri_response: unknown | null;
   declare signed_xml_file_id: string | null;
+  declare authorized_xml_file_id: string | null;
   declare retry_count: number;
   declare last_error: string | null;
   declare original_payload: unknown | null;
+  declare next_check_at: Date | null;
+  declare billing_voided_at: Date | null;
   declare created_at: Date;
   declare updated_at: Date;
 }
@@ -30,15 +33,18 @@ FiscalInvoiceModel.init(
     organization_id: { type: DataTypes.CHAR(36), allowNull: false },
     billing_invoice_id: { type: DataTypes.CHAR(36), allowNull: false, unique: true },
     number: { type: DataTypes.STRING(30), allowNull: false },
-    access_key: { type: DataTypes.CHAR(49), allowNull: false, unique: true },
+    access_key: { type: DataTypes.CHAR(49), allowNull: true, unique: true },
     status: { type: DataTypes.ENUM('pending', 'sent', 'authorized', 'rejected', 'error'), allowNull: false, defaultValue: 'pending' },
     authorization_number: { type: DataTypes.STRING(49), allowNull: true },
     authorization_date: { type: DataTypes.DATE, allowNull: true },
     sri_response: { type: DataTypes.JSON, allowNull: true },
     signed_xml_file_id: { type: DataTypes.CHAR(36), allowNull: true },
+    authorized_xml_file_id: { type: DataTypes.CHAR(36), allowNull: true },
     retry_count: { type: DataTypes.INTEGER, allowNull: false, defaultValue: 0 },
     last_error: { type: DataTypes.TEXT, allowNull: true },
     original_payload: { type: DataTypes.JSON, allowNull: true },
+    next_check_at: { type: DataTypes.DATE, allowNull: true },
+    billing_voided_at: { type: DataTypes.DATE, allowNull: true },
     created_at: DataTypes.DATE,
     updated_at: DataTypes.DATE,
   },

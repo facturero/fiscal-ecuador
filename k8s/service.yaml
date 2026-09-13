@@ -5,7 +5,13 @@ metadata:
   labels:
     app: fiscal-ecuador-node
 spec:
-  type: NodePort
+  # Solo lo llama el gateway desde dentro del clúster. Como NodePort quedaba
+  # expuesto en el puerto 31206 de la red local, sin pasar por la autenticación
+  # del gateway: el servicio confía en las cabeceras X-Organization-Id y
+  # X-Permissions, así que cualquiera en la red podía hacerse pasar por
+  # cualquier organización. El cambio de tipo se probó con
+  # `kubectl apply --dry-run=server` contra el clúster el 2026-09-13.
+  type: ClusterIP
   selector:
     app: fiscal-ecuador-node
   ports:

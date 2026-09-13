@@ -17,4 +17,6 @@ COPY --from=builder /app/sequelize.config.cjs ./
 COPY --from=builder /app/.sequelizerc ./
 COPY --from=builder /app/migrations ./migrations
 EXPOSE 3010
-CMD ["node", "dist/main.js"]
+# La telemetría se precarga con --import: en ESM tiene que registrarse antes de
+# importar la app (ver src/instrumentation.ts). Sin OTEL_EXPORTER_OTLP_ENDPOINT no hace nada.
+CMD ["node", "--import", "./dist/instrumentation.js", "dist/main.js"]

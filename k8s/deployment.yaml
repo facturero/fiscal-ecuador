@@ -93,24 +93,42 @@ spec:
                   key: url
             - name: CORS_ORIGIN
               value: "https://steep-geology-napping.ngrok-free.dev"
+            # Nombres reales de los Services del clúster (comprobado el 2026-09-13).
+            # Los anteriores (document-service-node:3007, tax-service-node,
+            # organization-service-node) no existen: daban ENOTFOUND, así que el
+            # servicio nunca pudo bajar un certificado, subir un XML ni leer los
+            # catálogos.
             - name: DOCUMENT_SERVICE_URL
-              value: "http://document-service-node:3007"
+              value: "http://document-service:3003"
             - name: TAX_SERVICE_URL
-              value: "http://tax-service-node:3005"
+              value: "http://tax-service:3005"
             - name: ORG_SERVICE_URL
-              value: "http://organization-service-node:3002"
+              value: "http://organization-service:3002"
+            # El mismo secret que billing, auth, organization y document-service.
+            # Antes salía de `fiscal-db/internalSecret`, que tenía el valor de
+            # desarrollo del repo.
             - name: INTERNAL_SERVICE_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: fiscal-db
-                  key: internalSecret
+                  name: internal-service-secret
+                  key: value
             - name: CERTIFICATE_MASTER_KEY
               valueFrom:
                 secretKeyRef:
                   name: fiscal-db
                   key: certMasterKey
+            # Ambiente del SRI. Sin el ConfigMap `fiscal-config` (hoy no existe) la
+            # variable queda vacía y el servicio usa `pruebas`. Para pasar a
+            # producción basta con la clave `sriEnvironment: produccion`: las URLs
+            # de cel.sri.gob.ec salen solas del ambiente. Las dos claves de URL
+            # solo sirven para apuntar a un simulador, y si contradicen el
+            # ambiente el servicio se niega a arrancar.
             - name: SRI_ENVIRONMENT
-              value: "pruebas"
+              valueFrom:
+                configMapKeyRef:
+                  name: fiscal-config
+                  key: sriEnvironment
+                  optional: true
             - name: SRI_RECEPTION_URL
               valueFrom:
                 configMapKeyRef:
@@ -123,8 +141,6 @@ spec:
                   name: fiscal-config
                   key: sriAuthorizationUrl
                   optional: true
-            - name: JWT_PUBLIC_KEY_PATH
-              value: "certs/public.pem"
             - name: OTEL_SERVICE_NAME
               value: "fiscal-ecuador"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT

@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { buildAccessKey, checkDigitMod11 } from '../domain/access-key.js';
+import { buildAccessKey, checkDigitMod11, numericCodeFor } from '../domain/access-key.js';
+
+// Las fechas van a mediodía UTC: así caen en el mismo día en Ecuador (UTC-5) y
+// el test no depende de la zona horaria de la máquina que lo corre.
+const noonUtc = (y: number, m: number, d: number) => new Date(Date.UTC(y, m - 1, d, 17, 0, 0));
 
 describe('checkDigitMod11 (validado contra ejemplo real publicado)', () => {
   it('reproduce el dígito verificador de un caso real documentado (Factuplan, RUC 1792146739001, factura 001-001-000000123, producción)', () => {
@@ -18,108 +22,59 @@ describe('checkDigitMod11 (validado contra ejemplo real publicado)', () => {
   });
 });
 
+const base = {
+  issueDate: noonUtc(2024, 1, 15),
+  documentTypeCode: '01',
+  issuerRuc: '1792175606001',
+  environment: 'pruebas' as const,
+  establishmentCode: '001',
+  emissionPointCode: '001',
+  sequentialNumber: '000000001',
+};
+
 describe('buildAccessKey', () => {
-  it('debe generar una clave de acceso de 49 dígitos', () => {
-    const key = buildAccessKey({
-      issueDate: new Date(2024, 0, 15),
-      documentTypeCode: '01',
-      issuerRuc: '1792175606001',
-      environment: 'pruebas' as const,
-      establishmentCode: '001',
-      emissionPointCode: '001',
-      sequentialNumber: '000000001',
-    });
+  it('genera una clave de 49 dígitos con los campos en su sitio', () => {
+    const key = buildAccessKey({ ...base, numericCode: '12345678' });
 
-    expect(key).toHaveLength(49);
     expect(key).toMatch(/^\d{49}$/);
+    expect(key.slice(0, 8)).toBe('15012024');
+    expect(key.slice(8, 10)).toBe('01');
+    expect(key.slice(10, 23)).toBe('1792175606001');
+    expect(key.slice(23, 24)).toBe('1');
+    expect(key.slice(24, 30)).toBe('001001');
+    expect(key.slice(30, 39)).toBe('000000001');
+    expect(key.slice(39, 47)).toBe('12345678');
+    expect(key.slice(47, 48)).toBe('1');
+    expect(key[48]).toBe(checkDigitMod11(key.slice(0, 48)));
   });
 
-  it('debe producir la misma clave con los mismos inputs (excepto código numérico aleatorio)', () => {
-    const inputs = {
-      issueDate: new Date(2024, 5, 20),
-      documentTypeCode: '01',
-      issuerRuc: '0992512549001',
-      environment: 'pruebas' as const,
-      establishmentCode: '001',
-      emissionPointCode: '002',
-      sequentialNumber: '000000123',
-    };
-
-    const key1 = buildAccessKey(inputs);
-    const key2 = buildAccessKey(inputs);
-
-    expect(key1).toHaveLength(49);
-    expect(key2).toHaveLength(49);
-
-    const base1 = key1.slice(0, 39);
-    const base2 = key2.slice(0, 39);
-    expect(base1).toBe(base2);
+  it('la misma factura da siempre la misma clave: un reintento no crea otro comprobante', () => {
+    const code = numericCodeFor('6f1c2b1e-8d4a-4c8e-9f3b-2a7d5e9c1b10');
+    expect(code).toMatch(/^\d{8}$/);
+    expect(numericCodeFor('6f1c2b1e-8d4a-4c8e-9f3b-2a7d5e9c1b10')).toBe(code);
+    expect(numericCodeFor('otra-factura')).not.toBe(code);
+    expect(buildAccessKey({ ...base, numericCode: code })).toBe(buildAccessKey({ ...base, numericCode: code }));
   });
 
-  it('debe fallar si la base no tiene exactamente 48 dígitos', () => {
-    expect(() => buildAccessKey({
-      issueDate: new Date(2024, 0, 1),
-      documentTypeCode: '01',
-      issuerRuc: '123',
-      environment: 'pruebas' as const,
-      establishmentCode: '001',
-      emissionPointCode: '001',
-      sequentialNumber: '000000001',
-    })).toThrow('48');
+  it('sin código numérico usa uno aleatorio distinto cada vez', () => {
+    const keys = new Set(Array.from({ length: 20 }, () => buildAccessKey(base).slice(39, 47)));
+    expect(keys.size).toBeGreaterThan(1);
   });
 
-  it('debe cumplir modulo 11 con caso real SRI (RUC 1792175606001)', () => {
-    const key = buildAccessKey({
-      issueDate: new Date(2024, 0, 15),
-      documentTypeCode: '01',
-      issuerRuc: '1792175606001',
-      environment: 'pruebas' as const,
-      establishmentCode: '001',
-      emissionPointCode: '001',
-      sequentialNumber: '000000001',
-    });
+  it('la fecha es la de Ecuador: las 20:30 del 13 (01:30 UTC del 14) es el día 13', () => {
+    const key = buildAccessKey({ ...base, issueDate: new Date('2026-09-14T01:30:00Z'), numericCode: '00000000' });
+    expect(key.slice(0, 8)).toBe('13092026');
+  });
 
-    expect(key).toHaveLength(49);
-    expect(key).toMatch(/^\d{49}$/);
+  it('ambiente 2 en producción', () => {
+    expect(buildAccessKey({ ...base, environment: 'produccion', numericCode: '00000000' })[23]).toBe('2');
+  });
 
-    const year = key.slice(4, 8);
-    expect(year).toBe('2024');
-    const month = key.slice(2, 4);
-    expect(month).toBe('01');
-    const day = key.slice(0, 2);
-    expect(day).toBe('15');
+  it('falla si la base no tiene exactamente 48 dígitos', () => {
+    expect(() => buildAccessKey({ ...base, issuerRuc: '123' })).toThrow('48');
+  });
 
-    const tipoDoc = key.slice(8, 10);
-    expect(tipoDoc).toBe('01');
-
-    const ruc = key.slice(10, 23);
-    expect(ruc).toBe('1792175606001');
-
-    const ambiente = key.slice(23, 24);
-    expect(ambiente).toBe('1');
-
-    const serie = key.slice(24, 30);
-    expect(serie).toBe('001001');
-
-    const secuencial = key.slice(30, 39);
-    expect(secuencial).toBe('000000001');
-
-    const codigoNumerico = key.slice(39, 47);
-    expect(codigoNumerico).toMatch(/^\d{8}$/);
-
-    const digitoVerificador = parseInt(key[48], 10);
-    expect(digitoVerificador).toBeGreaterThanOrEqual(0);
-    expect(digitoVerificador).toBeLessThanOrEqual(9);
-
-    const weights = [2, 3, 4, 5, 6, 7];
-    let sum = 0;
-    let weightIndex = 0;
-    for (let i = 47; i >= 0; i--) {
-      sum += parseInt(key[i], 10) * weights[weightIndex % weights.length];
-      weightIndex++;
-    }
-    const mod = sum % 11;
-    const expected = 11 - mod === 11 ? 0 : 11 - mod === 10 ? 1 : 11 - mod;
-    expect(digitoVerificador).toBe(expected);
+  it('falla con un código numérico mal formado', () => {
+    expect(() => buildAccessKey({ ...base, numericCode: '12ab' })).toThrow(/8 dígitos/);
   });
 });

@@ -108,7 +108,6 @@ jobs:
             --from-literal=user="$DB_USER" \
             --from-literal=password="$DB_PASSWORD" \
             --from-literal=name="$DB_NAME" \
-            --from-literal=internalSecret="$INTERNAL_SERVICE_SECRET" \
             --from-literal=certMasterKey="$CERTIFICATE_MASTER_KEY" \
             --dry-run=client -o yaml | kubectl apply -f -
           kubectl create secret generic fiscal-rabbitmq \
