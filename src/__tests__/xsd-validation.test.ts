@@ -3,28 +3,34 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { validateXML } from 'xmllint-wasm';
 import { buildInvoiceXml, type InvoiceXmlInput } from '../domain/invoice-xml-builder.js';
+import { buildCreditNoteXml } from '../domain/credit-note-xml-builder.js';
 import { signXmlWithP12 } from '../domain/xml-signer.js';
 import type { InvoiceIssuedPayload } from '../domain/types.js';
 import { sampleInvoice, selfSignedP12, TAX_CODES } from './fixtures.js';
 
 /**
- * El XML que generamos, validado contra el XSD OFICIAL del SRI (factura
- * v2.1.0, ver test-resources/sri-xsd/README.md) con libxml2 (xmllint-wasm).
- * Es la misma validación que hace el SRI al recibir: si esto falla, el SRI
- * devuelve "ARCHIVO NO CUMPLE ESTRUCTURA XML".
+ * El XML que generamos, validado contra los XSD OFICIALES del SRI (factura
+ * v2.1.0 y nota de crédito v1.1.0, ver test-resources/sri-xsd/README.md) con
+ * libxml2 (xmllint-wasm). Es la misma validación que hace el SRI al recibir:
+ * si esto falla, el SRI devuelve "ARCHIVO NO CUMPLE ESTRUCTURA XML".
  */
 const XSD_DIR = resolve(import.meta.dirname, '../../test-resources/sri-xsd');
 const read = (name: string) => readFileSync(resolve(XSD_DIR, name), 'utf8');
 const FACTURA_XSD = read('factura_V2.1.0.xsd');
+const NOTA_CREDITO_XSD = read('notaCredito_V1.1.0.xsd');
 const XMLDSIG_XSD = read('xmldsig-core-schema.xsd');
 
-async function validate(xml: string): Promise<{ valid: boolean; errors: string[] }> {
+async function validateWith(xsd: string, xml: string): Promise<{ valid: boolean; errors: string[] }> {
   const result = await validateXML({
-    xml: [{ fileName: 'factura.xml', contents: xml }],
-    schema: [FACTURA_XSD],
+    xml: [{ fileName: 'comprobante.xml', contents: xml }],
+    schema: [xsd],
     preload: [{ fileName: 'xmldsig-core-schema.xsd', contents: XMLDSIG_XSD }],
   });
   return { valid: result.valid, errors: result.errors.map((e) => e.rawMessage) };
+}
+
+async function validate(xml: string): Promise<{ valid: boolean; errors: string[] }> {
+  return validateWith(FACTURA_XSD, xml);
 }
 
 const KEY = '1309202601179217560600110010010000001231234567814';
@@ -41,6 +47,30 @@ function build(payload: InvoiceIssuedPayload = sampleInvoice(), overrides: Parti
     taxCodeById: TAX_CODES,
     identificationTypeCode: 'RUC',
     ...overrides,
+  });
+}
+
+/** Una nota de crédito que devuelve por completo la factura del sample. */
+function buildCreditNote(overrides: Partial<InvoiceIssuedPayload> = {}): string {
+  return buildCreditNoteXml({
+    payload: sampleInvoice({
+      invoiceId: '6f1c2b1e-8d4a-4c8e-9f3b-2a7d5e9c1b11',
+      number: '001-001-000000124',
+      documentTypeCode: '04' as const,
+      relatedInvoiceId: '6f1c2b1e-8d4a-4c8e-9f3b-2a7d5e9c1b10',
+      relatedIssueDate: '2026-09-13T17:30:00.000Z',
+      creditNoteReason: 'Devolución total de la mercadería por garantía',
+      ...overrides,
+    }),
+    accessKey: '1309202601179217560600110010040000001241234567810',
+    environment: 'pruebas',
+    issueDate: new Date('2026-09-13T18:00:00.000Z'),
+    establishmentCode: '001',
+    emissionPointCode: '001',
+    sequentialNumber: '000000124',
+    taxCodeById: TAX_CODES,
+    identificationTypeCode: 'RUC',
+    modified: { documentType: '01', number: '001-001-000000123', issueDate: '2026-09-13T17:30:00.000Z' },
   });
 }
 
@@ -76,6 +106,22 @@ describe('XSD oficial del SRI (factura v2.1.0)', () => {
   it('a consumidor final, sin email ni teléfono, es válida', async () => {
     const payload = sampleInvoice({ customerSnapshot: null, subtotalCents: 25_00, taxTotalCents: 3_00, totalCents: 28_00 });
     expect(await validate(build(payload, { identificationTypeCode: undefined }))).toEqual({ valid: true, errors: [] });
+  });
+
+  describe('nota de crédito (XSD oficial v1.1.0)', () => {
+    it('nuestra nota de crédito sin firmar es válida', async () => {
+      expect(await validateWith(NOTA_CREDITO_XSD, buildCreditNote())).toEqual({ valid: true, errors: [] });
+    });
+
+    it('nuestra nota de crédito firmada (con ds:Signature) es válida', async () => {
+      const p12 = selfSignedP12();
+      const { signedXml } = signXmlWithP12(buildCreditNote(), p12.buffer, p12.password);
+      expect(await validateWith(NOTA_CREDITO_XSD, signedXml)).toEqual({ valid: true, errors: [] });
+    });
+
+    it('el número del comprobante modificado debe ser el número, no la clave de acceso', async () => {
+      expect((await validateWith(NOTA_CREDITO_XSD, buildCreditNote().replace('<numDocModificado>001-001-000000123</numDocModificado>', `<numDocModificado>${KEY}</numDocModificado>`))).valid).toBe(false);
+    });
   });
 
   it('con pasaporte, cantidades con decimales, descuento y no objeto de IVA es válida', async () => {

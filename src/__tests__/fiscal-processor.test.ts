@@ -9,7 +9,7 @@ import type {
 } from '../application/ports.js';
 import type { SriAuthorizationResponse, SriReceptionResponse } from '../infrastructure/http/sri-client.js';
 import { SriUnavailableError } from '../infrastructure/http/sri-client.js';
-import { sampleInvoice, TAX_CODES } from './fixtures.js';
+import { sampleInvoice, sampleCreditNote, TAX_CODES } from './fixtures.js';
 
 class MemoryStore implements FiscalInvoiceStore {
   records = new Map<string, FiscalInvoiceRecord>();
@@ -19,20 +19,22 @@ class MemoryStore implements FiscalInvoiceStore {
     const r = [...this.records.values()].find((x) => x.billing_invoice_id === id);
     return r ? structuredClone(r) : null;
   }
-  async findOtherWithNumber(org: string, number: string, billingId: string) {
-    return [...this.records.values()].find((x) => x.organization_id === org && x.number === number && x.billing_invoice_id !== billingId) ?? null;
+  async findOtherWithNumber(org: string, number: string, documentType: string, billingId: string) {
+    return [...this.records.values()]
+      .find((x) => x.organization_id === org && x.document_type === documentType && x.number === number && x.billing_invoice_id !== billingId) ?? null;
   }
-  async findLatestBefore(org: string, number: string) {
+  async findLatestBefore(org: string, number: string, documentType: string) {
     const prefix = number.slice(0, 8);
-    const list = [...this.records.values()].filter((x) => x.organization_id === org && x.number.startsWith(prefix) && x.number < number);
+    const list = [...this.records.values()]
+      .filter((x) => x.organization_id === org && x.document_type === documentType && x.number.startsWith(prefix) && x.number < number);
     if (!list.length) return null;
     list.sort((a, b) => (a.number < b.number ? -1 : a.number > b.number ? 1 : 0));
     return structuredClone(list[list.length - 1]);
   }
-  async findBetween(org: string, fromNumber: string, toNumber: string) {
+  async findBetween(org: string, fromNumber: string, toNumber: string, documentType: string) {
     const prefix = fromNumber.slice(0, 8);
     return [...this.records.values()]
-      .filter((x) => x.organization_id === org && x.number.startsWith(prefix) && x.number > fromNumber && x.number < toNumber)
+      .filter((x) => x.organization_id === org && x.document_type === documentType && x.number.startsWith(prefix) && x.number > fromNumber && x.number < toNumber)
       .map((x) => structuredClone(x));
   }
   async save(record: FiscalInvoiceRecord, event?: FiscalEvent) {
@@ -76,7 +78,7 @@ function setup(options: {
   const store = new MemoryStore();
   const sent: string[] = [];
   const queried: string[] = [];
-  const uploads: Array<{ category: string; resourceType: string }> = [];
+  const uploads: Array<{ category: string; resourceType: string; originalName: string }> = [];
   const expired: string[] = [];
   const reception = options.reception ?? [RECIBIDA];
   const authorization = options.authorization ?? [];
@@ -89,7 +91,7 @@ function setup(options: {
       markExpired: async (list) => { expired.push(...list); },
     },
     documents: {
-      upload: async (p) => { uploads.push({ category: p.category, resourceType: p.resourceType }); return `file-${uploads.length}`; },
+      upload: async (p) => { uploads.push({ category: p.category, resourceType: p.resourceType, originalName: p.originalName }); return `file-${uploads.length}`; },
       download: async () => Buffer.from('p12'),
     },
     catalogs: {
@@ -111,7 +113,7 @@ function setup(options: {
         return next;
       },
     },
-    signer: { sign: (xml) => ({ signedXml: xml.replace('</factura>', '<ds:Signature/></factura>') }) },
+    signer: { sign: (xml) => ({ signedXml: xml.replace(/<\/[A-Za-z_][\w.-]*>$/, '<ds:Signature/></comprobante>') }) },
     decryptPassword: () => 'clave',
     environment: 'pruebas',
     now: () => now,
@@ -135,7 +137,7 @@ describe('Emisión', () => {
     expect(record?.access_key).toMatch(/^\d{49}$/);
     expect(t.sent).toHaveLength(1);
     expect(t.sent[0]).toContain('<ds:Signature/>');
-    expect(t.uploads).toEqual([{ category: 'comprobante-firmado', resourceType: 'fiscal_invoice' }]);
+    expect(t.uploads).toEqual([{ category: 'comprobante-firmado', resourceType: 'fiscal_invoice', originalName: 'factura-001-001-000000123-firmado.xml' }]);
     expect(record?.next_check_at?.getTime()).toBe(t.now.getTime() + RETRY_POLICY.firstAuthorizationCheckMs);
     expect(t.store.eventTypes()).toEqual(['sent']);
   });
@@ -182,6 +184,92 @@ describe('Emisión', () => {
     expect(record?.status).toBe('error');
     expect(record?.last_error).toMatch(/secuencial se reutilizó/);
     expect(t.sent).toHaveLength(1);
+  });
+});
+
+describe('Notas de crédito', () => {
+  it('emite la nota de crédito referenciando la factura original, con su propio tipo y secuencia', async () => {
+    const t = setup();
+    await t.processor.processIssued(sampleInvoice());
+    const record = await t.processor.processIssued(sampleCreditNote());
+
+    expect(record?.status).toBe('sent');
+    expect(record?.document_type).toBe('04');
+    expect(t.sent).toHaveLength(2);
+    const nc = t.sent[1];
+    expect(nc).toContain('<notaCredito id="comprobante"');
+    expect(nc).toContain('<codDoc>04</codDoc>');
+    expect(nc).toContain('<numDocModificado>001-001-000000123</numDocModificado>');
+    expect(nc).toContain('<codDocModificado>01</codDocModificado>');
+    expect(nc).toContain('Devolución total de la mercadería');
+    expect(t.uploads.at(-1)).toEqual({ category: 'comprobante-firmado', resourceType: 'fiscal_invoice', originalName: 'nota-credito-001-001-000000124-firmado.xml' });
+  });
+
+  it('factura y nota de crédito pueden compartir número: son series distintas', async () => {
+    const t = setup();
+    const pad = '000000200';
+    await t.processor.processIssued(sampleInvoice({ invoiceId: 'factura-200', number: `001-001-${pad}`, sequentialNumber: pad }));
+    const nc = await t.processor.processIssued(sampleCreditNote({ relatedInvoiceId: 'factura-200', number: `001-001-${pad}`, sequentialNumber: pad }));
+    expect(nc?.status).toBe('sent');
+    expect(nc?.document_type).toBe('04');
+  });
+
+  it('sin motivo no se envía: el SRI y el cliente lo requieren', async () => {
+    const t = setup();
+    await t.processor.processIssued(sampleInvoice());
+    const record = await t.processor.processIssued(sampleCreditNote({ creditNoteReason: null }));
+    expect(record?.status).toBe('error');
+    expect(record?.last_error).toMatch(/motivo/);
+    expect(t.sent).toHaveLength(1);
+  });
+
+  it('si el original no tiene comprobante fiscal, no se envía', async () => {
+    const t = setup();
+    const record = await t.processor.processIssued(sampleCreditNote());
+    expect(record?.status).toBe('error');
+    expect(record?.last_error).toMatch(/no tiene comprobante fiscal/);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('si el original aún no tiene clave de acceso (nunca se envió), no se envía', async () => {
+    const t = setup();
+    const original = sampleInvoice({ invoiceId: 'factura-nunca-enviada' });
+    t.store.records.set('orig-sin-clave', {
+      id: 'orig-sin-clave',
+      organization_id: original.organizationId,
+      billing_invoice_id: original.invoiceId,
+      document_type: '01',
+      number: original.number,
+      access_key: null,
+      status: 'error',
+      authorization_number: null,
+      authorization_date: null,
+      sri_response: null,
+      signed_xml_file_id: null,
+      authorized_xml_file_id: null,
+      retry_count: 5,
+      last_error: null,
+      original_payload: original,
+      next_check_at: null,
+      billing_voided_at: null,
+      created_at: t.now,
+      updated_at: t.now,
+    });
+    const record = await t.processor.processIssued(sampleCreditNote({ relatedInvoiceId: original.invoiceId }));
+    expect(record?.status).toBe('error');
+    expect(record?.last_error).toMatch(/aún no tiene clave de acceso/);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('una nota de crédito anulada en billing no se envía', async () => {
+    const t = setup();
+    await t.processor.processIssued(sampleInvoice());
+    const ncPayload = sampleCreditNote();
+    await t.processor.processIssued(ncPayload);
+    await t.processor.processVoided({ invoiceId: ncPayload.invoiceId, number: ncPayload.number, voidedAt: '2026-09-14T10:00:00.000Z', organizationId: ncPayload.organizationId, userId: 'user-1' });
+    const record = await t.processor.processIssued(sampleCreditNote());
+    expect(record?.status).toBe('sent');
+    expect(t.sent).toHaveLength(2);
   });
 });
 
@@ -339,7 +427,7 @@ describe('Autorización', () => {
     expect(record.status).toBe('authorized');
     expect(record.authorization_number).toBe('AUT-1');
     expect(record.authorized_xml_file_id).toBe('file-2');
-    expect(t.uploads.at(-1)).toEqual({ category: 'comprobante-autorizado', resourceType: 'fiscal_invoice' });
+    expect(t.uploads.at(-1)).toEqual({ category: 'comprobante-autorizado', resourceType: 'fiscal_invoice', originalName: 'factura-001-001-000000123-autorizado.xml' });
     expect(record.sri_response).not.toHaveProperty('xmlAutorizado');
     expect(t.store.eventTypes()).toEqual(['sent', 'authorized']);
   });

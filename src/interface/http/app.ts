@@ -105,10 +105,15 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
     async (c) => {
       const rows = await FiscalInvoiceModel.findAll({
         where: { organization_id: c.get('organizationId') },
-        attributes: ['number'],
+        attributes: ['number', 'document_type'],
         raw: true,
       });
-      const series = findSequenceGaps(rows.map((r) => r.number));
+      // Las series de facturas (01) y de notas de crédito (04) comparten el
+      // formato de número pero son cuentas distintas en billing: se agrupan por
+      // tipo para no reportar falsos huecos donde conviven ambas numeraciones.
+      const series = findSequenceGaps(
+        rows.map((r) => ({ number: r.number, series: `${r.document_type}|${r.number.slice(0, 8)}` })),
+      );
       return c.json({ series, hasGaps: series.some((s) => s.missingCount > 0) });
     },
   );

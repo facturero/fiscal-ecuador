@@ -10,6 +10,7 @@ export class FiscalInvoiceModel extends Model<
   declare id: string;
   declare organization_id: string;
   declare billing_invoice_id: string;
+  declare document_type: string;
   declare number: string;
   declare access_key: string | null;
   declare status: 'pending' | 'sent' | 'authorized' | 'rejected' | 'error';
@@ -32,6 +33,7 @@ FiscalInvoiceModel.init(
     id: { type: DataTypes.CHAR(36), primaryKey: true },
     organization_id: { type: DataTypes.CHAR(36), allowNull: false },
     billing_invoice_id: { type: DataTypes.CHAR(36), allowNull: false, unique: true },
+    document_type: { type: DataTypes.CHAR(2), allowNull: false, defaultValue: '01' },
     number: { type: DataTypes.STRING(30), allowNull: false },
     access_key: { type: DataTypes.CHAR(49), allowNull: true, unique: true },
     status: { type: DataTypes.ENUM('pending', 'sent', 'authorized', 'rejected', 'error'), allowNull: false, defaultValue: 'pending' },

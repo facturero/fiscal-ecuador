@@ -60,6 +60,24 @@ export function sampleInvoice(overrides: Partial<InvoiceIssuedPayload> = {}): In
 
 export const TAX_CODES = { 'rate-iva15': 'IVA15', 'rate-iva0': 'IVA0', 'rate-no-objeto': 'NO_OBJETO' };
 
+/**
+ * Una nota de crédito que revierte toda la factura del sample. Comparte montos y
+ * líneas con ella (en positivo); solo cambia lo que anuncia que es una nota de
+ * crédito: tipo 04, el comprobante que modifica y el motivo.
+ */
+export function sampleCreditNote(overrides: Partial<InvoiceIssuedPayload> = {}): InvoiceIssuedPayload {
+  return sampleInvoice({
+    invoiceId: '6f1c2b1e-8d4a-4c8e-9f3b-2a7d5e9c1b11',
+    number: '001-001-000000124',
+    sequentialNumber: '000000124',
+    documentTypeCode: '04',
+    relatedInvoiceId: '6f1c2b1e-8d4a-4c8e-9f3b-2a7d5e9c1b10',
+    relatedIssueDate: '2026-09-13T17:30:00.000Z',
+    creditNoteReason: 'Devolución total de la mercadería por garantía',
+    ...overrides,
+  });
+}
+
 /** Un .p12 autofirmado, para probar la firma sin depender de un certificado real. */
 export function selfSignedP12(options: { password?: string; notBefore?: Date; notAfter?: Date } = {}) {
   const password = options.password ?? 'clave-de-prueba';

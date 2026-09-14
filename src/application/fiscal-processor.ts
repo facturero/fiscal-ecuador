@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { InvoiceIssuedPayload, InvoiceVoidedPayload } from '../domain/types.js';
+import { documentTypeOf } from '../domain/types.js';
 import { FiscalValidationError } from '../domain/errors.js';
 import { validateInvoiceForSri } from '../domain/invoice-validation.js';
 import { buildAccessKey, numericCodeFor } from '../domain/access-key.js';
 import { buildInvoiceXml } from '../domain/invoice-xml-builder.js';
+import { buildCreditNoteXml } from '../domain/credit-note-xml-builder.js';
 import { ecuadorToday } from '../domain/ecuador-time.js';
 import { describeMessages, isAlreadyReceived, SriUnavailableError } from '../infrastructure/http/sri-client.js';
 import type {
@@ -100,9 +102,11 @@ export class FiscalInvoiceProcessor {
       throw new FiscalValidationError(`Fecha de emisión inválida: "${payload.issueDate}"`);
     }
 
+    const docType = documentTypeOf(payload);
+
     record.access_key = buildAccessKey({
       issueDate,
-      documentTypeCode: '01',
+      documentTypeCode: docType,
       issuerRuc: issuer.taxId,
       environment: deps.environment,
       establishmentCode: issuer.establishmentCode,
@@ -111,11 +115,36 @@ export class FiscalInvoiceProcessor {
       numericCode: numericCodeFor(payload.invoiceId),
     });
 
-    const duplicate = await deps.store.findOtherWithNumber(payload.organizationId, payload.number, payload.invoiceId);
+    const duplicate = await deps.store.findOtherWithNumber(payload.organizationId, payload.number, docType, payload.invoiceId);
     if (duplicate) {
       throw new FiscalValidationError(
-        `El número ${payload.number} ya pertenece a otra factura (${duplicate.billing_invoice_id}): el secuencial se reutilizó`,
+        `El número ${payload.number} ya pertenece a otro comprobante del mismo tipo (${duplicate.billing_invoice_id}): el secuencial se reutilizó`,
       );
+    }
+
+    // Una nota de crédito necesita la factura que modifica: sin ella no hay a qué
+    // acreditar los valores. El original pudo haber llegado por un evento anterior;
+    // fiscal es quien tiene su clave de acceso.
+    let modified: { documentType: string; number: string; issueDate: string } | undefined;
+    if (docType === '04') {
+      this.validateCreditNoteRefs(payload);
+      const original = await deps.store.findByBillingInvoiceId(payload.relatedInvoiceId!);
+      if (!original) {
+        throw new FiscalValidationError('La factura que modifica esta nota de crédito no tiene comprobante fiscal en este sistema');
+      }
+      if (!original.access_key) {
+        throw new FiscalValidationError('La factura que modifica esta nota de crédito aún no tiene clave de acceso: todavía no se envió al SRI');
+      }
+      const originalIssueDate = payload.relatedIssueDate ?? (original.original_payload?.issueDate as string | undefined) ?? null;
+      if (!originalIssueDate) {
+        throw new FiscalValidationError('La nota de crédito no indica la fecha de emisión del comprobante que modifica');
+      }
+      modified = {
+        documentType: original.document_type ?? '01',
+        // El esquema del SRI pide el NÚMERO del comprobante modificado (ddd-ddd-ddddddddd), no su clave de acceso.
+        number: original.number,
+        issueDate: originalIssueDate,
+      };
     }
 
     const certificate = await this.pickCertificate(payload.organizationId);
@@ -143,18 +172,32 @@ export class FiscalInvoiceProcessor {
       deps.catalogs.issuerProfile(payload.organizationId),
     ]);
 
-    const unsignedXml = buildInvoiceXml({
-      payload,
-      accessKey: record.access_key,
-      environment: deps.environment,
-      issueDate,
-      establishmentCode: issuer.establishmentCode,
-      emissionPointCode: issuer.emissionPointCode,
-      sequentialNumber: payload.sequentialNumber,
-      taxCodeById,
-      identificationTypeCode,
-      issuerProfile,
-    });
+    const unsignedXml = docType === '04'
+      ? buildCreditNoteXml({
+          payload,
+          accessKey: record.access_key,
+          environment: deps.environment,
+          issueDate,
+          establishmentCode: issuer.establishmentCode,
+          emissionPointCode: issuer.emissionPointCode,
+          sequentialNumber: payload.sequentialNumber,
+          taxCodeById,
+          identificationTypeCode,
+          issuerProfile,
+          modified: modified!,
+        })
+      : buildInvoiceXml({
+          payload,
+          accessKey: record.access_key,
+          environment: deps.environment,
+          issueDate,
+          establishmentCode: issuer.establishmentCode,
+          emissionPointCode: issuer.emissionPointCode,
+          sequentialNumber: payload.sequentialNumber,
+          taxCodeById,
+          identificationTypeCode,
+          issuerProfile,
+        });
 
     let signedXml: string;
     try {
@@ -170,7 +213,7 @@ export class FiscalInvoiceProcessor {
         organizationId: payload.organizationId,
         resourceId: payload.invoiceId,
         category: 'comprobante-firmado',
-        originalName: `factura-${payload.number}-firmado.xml`,
+        originalName: `${docType === '04' ? 'nota-credito' : 'factura'}-${payload.number}-firmado.xml`,
         mimeType: 'application/xml',
         buffer: Buffer.from(signedXml, 'utf-8'),
       });
@@ -198,7 +241,7 @@ export class FiscalInvoiceProcessor {
         : 'El SRI ya tenía este comprobante; se consulta su autorización';
       await deps.store.save(record, { type: 'sent', message, requiresAttention: false });
 
-      const gap = await this.sequenceGapNote(payload.organizationId, payload.number);
+      const gap = await this.sequenceGapNote(payload.organizationId, payload.number, docType);
       if (gap) {
         this.log.warn(`[fiscal-ecuador] ${gap}`);
         // Solo auditoría: los huecos se dan de una en una y no requieren a nadie
@@ -272,14 +315,17 @@ export class FiscalInvoiceProcessor {
   }
 
   /**
-   * ¿El secuencial del mismo establecimiento/punto saltó sin explicación? Los
-   * números salen de billing, uno por cada emisión: si este es más de uno que
-   * el anterior y algún número intermedio no tiene factura alguna (ni siquiera
-   * anulada o fallida), algo pasó — un evento perdido, un secuencial quemado a
-   * mano. Solo se avisa; el número ya está consumido. Ver ports.ts.
+   * ¿El secuencial del mismo establecimiento/punto y tipo de documento saltó sin
+   * explicación? Los números salen de billing, uno por cada emisión: si este es
+   * más de uno que el anterior y algún número intermedio no tiene comprobante
+   * alguno (ni siquiera anulado o fallido), algo pasó — un evento perdido, un
+   * secuencial quemado a mano. Las series de facturas (01) y de notas de crédito
+   * (04) comparten el formato de número pero son cuentas distintas en billing;
+   * comparar solo dentro del tipo evita falsos huecos. Solo se avisa; el número
+   * ya está consumido. Ver ports.ts.
    */
-  private async sequenceGapNote(organizationId: string, number: string): Promise<string | null> {
-    const prev = await this.deps.store.findLatestBefore(organizationId, number);
+  private async sequenceGapNote(organizationId: string, number: string, documentType: string): Promise<string | null> {
+    const prev = await this.deps.store.findLatestBefore(organizationId, number, documentType);
     if (!prev) return null;
 
     const seqOf = (n: string): number => {
@@ -290,11 +336,21 @@ export class FiscalInvoiceProcessor {
     const to = seqOf(number);
     if (!Number.isFinite(from) || !Number.isFinite(to) || to - from <= 1) return null;
 
-    const inBetween = await this.deps.store.findBetween(organizationId, prev.number, number);
+    const inBetween = await this.deps.store.findBetween(organizationId, prev.number, number, documentType);
     const missing = to - from - 1 - inBetween.length;
     if (missing <= 0) return null;
 
-    return `Secuencial ${prev.number} → ${number}: se saltaron ${missing} número(s) de la serie sin factura que lo explique`;
+    return `Secuencial ${prev.number} → ${number}: se saltaron ${missing} número(s) de la serie sin comprobante que lo explique`;
+  }
+
+  /** La referencia al comprobante que una nota de crédito modifica y su motivo. */
+  private validateCreditNoteRefs(payload: InvoiceIssuedPayload): void {
+    if (!payload.relatedInvoiceId) {
+      throw new FiscalValidationError('La nota de crédito no indica la factura que modifica (relatedInvoiceId)');
+    }
+    if (!payload.creditNoteReason?.trim()) {
+      throw new FiscalValidationError('El motivo de la nota de crédito no puede estar vacío');
+    }
   }
 
   /** Consulta la autorización de una factura ya recibida por el SRI. */
@@ -464,6 +520,7 @@ export class FiscalInvoiceProcessor {
       id: this.newId(),
       organization_id: payload.organizationId,
       billing_invoice_id: payload.invoiceId,
+      document_type: documentTypeOf(payload),
       number: payload.number,
       access_key: null,
       status: 'pending',

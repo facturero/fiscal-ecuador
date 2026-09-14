@@ -186,7 +186,8 @@ interface Buyer {
   phone: string | null;
 }
 
-function buyerFor(payload: InvoiceIssuedPayload, identificationTypeCode?: string): Buyer {
+/** Compartido con el builder de nota de crédito. */
+export function buyerFor(payload: InvoiceIssuedPayload, identificationTypeCode?: string): Buyer {
   const customer = payload.customerSnapshot;
   const identification = customer?.identification?.trim() || CONSUMIDOR_FINAL_ID;
 
@@ -226,18 +227,18 @@ function guessIdentificationType(identification: string): string {
 }
 
 /** El SKU si cabe; si no, el id interno sin guiones recortado a lo que admite el esquema. */
-function productCode(sku: string | null | undefined, productId: string): string {
+export function productCode(sku: string | null | undefined, productId: string): string {
   const clean = sku?.trim();
   if (clean && clean.length <= MAX_PRODUCT_CODE) return clean;
   return productId.replace(/-/g, '').slice(0, MAX_PRODUCT_CODE);
 }
 
-function money(cents: number): string {
+export function money(cents: number): string {
   return (cents / 100).toFixed(2);
 }
 
 /** Hasta 6 decimales (lo que admite el esquema), sin ceros de más pero con al menos 2. */
-function quantity(value: number): string {
+export function quantity(value: number): string {
   return Number(value).toFixed(6).replace(/0{1,4}$/, '');
 }
 
@@ -246,6 +247,6 @@ function quantity(value: number): string {
  * calcula sobre el texto tal cual y el SRI la verifica tras canonicalizar, y la
  * canonicalización deja esas comillas sin escapar. Escaparlas aquí rompe el digest.
  */
-function text(value: string): string {
+export function text(value: string): string {
   return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }

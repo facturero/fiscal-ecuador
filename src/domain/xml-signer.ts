@@ -45,8 +45,14 @@ export function signXmlWithP12(unsignedXml: string, p12Buffer: Buffer, password:
   // El digest es del elemento referenciado (`#comprobante`), no del archivo:
   // la canonicalización con la que el SRI lo verifica quita la declaración
   // `<?xml ...?>`, así que hashearla daba un digest que nunca coincidía.
-  const rootStart = unsignedXml.indexOf('<factura');
-  if (rootStart === -1) throw new Error('No se encontró el elemento <factura> en el XML');
+  // El root no es siempre `<factura>` (una nota de crédito es `<notaCredito>`):
+  // se lee el nombre del primer elemento real en vez de hardcodearlo.
+  const rootMatch = /^<\?xml[^>]*\?>\s*<([A-Za-z_][\w.-]*)/.exec(unsignedXml);
+  const rootName = rootMatch?.[1];
+  if (!rootName) throw new Error(`No se encontró el elemento raíz en el XML (${String(rootMatch).slice(0, 40)})`);
+
+  const rootStart = unsignedXml.indexOf(`<${rootName}`);
+  if (rootStart === -1) throw new Error(`No se encontró el elemento <${rootName}> en el XML`);
   const docMd = forge.md.sha256.create();
   docMd.update(unsignedXml.slice(rootStart), 'utf8');
   const docDigest = forge.util.encode64(docMd.digest().getBytes());
@@ -69,8 +75,8 @@ export function signXmlWithP12(unsignedXml: string, p12Buffer: Buffer, password:
   const signatureId = `Signature-${certSerial}`;
   const signatureXml = buildSignatureXml(signedInfoXml, signatureValue, signedPropertiesXml, certBase64, signatureId, certSerial);
 
-  const insertPoint = unsignedXml.lastIndexOf('</factura>');
-  if (insertPoint === -1) throw new Error('No se encontró cierre de <factura> en el XML');
+  const insertPoint = unsignedXml.lastIndexOf(`</${rootName}>`);
+  if (insertPoint === -1) throw new Error(`No se encontró cierre de <${rootName}> en el XML`);
 
   // Sin nada alrededor de la firma: el transform `enveloped-signature` quita
   // solo el elemento <ds:Signature>, y un salto de línea añadido aquí se quedaba

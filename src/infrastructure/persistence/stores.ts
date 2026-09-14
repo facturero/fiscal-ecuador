@@ -29,21 +29,23 @@ export class SequelizeFiscalInvoiceStore implements FiscalInvoiceStore {
     return row ? toRecord(row) : null;
   }
 
-  async findOtherWithNumber(organizationId: string, number: string, billingInvoiceId: string): Promise<FiscalInvoiceRecord | null> {
+  async findOtherWithNumber(organizationId: string, number: string, documentType: string, billingInvoiceId: string): Promise<FiscalInvoiceRecord | null> {
     const row = await FiscalInvoiceModel.findOne({
-      where: { organization_id: organizationId, number, billing_invoice_id: { [Op.ne]: billingInvoiceId } },
+      where: { organization_id: organizationId, number, document_type: documentType, billing_invoice_id: { [Op.ne]: billingInvoiceId } },
     });
     return row ? toRecord(row) : null;
   }
 
-  async findLatestBefore(organizationId: string, number: string): Promise<FiscalInvoiceRecord | null> {
+  async findLatestBefore(organizationId: string, number: string, documentType: string): Promise<FiscalInvoiceRecord | null> {
     // El prefijo (establecimiento-punto) va delante del secuencial: comparar
     // cadenas del mismo prefijo es comparar secuenciales. El LIKE evita saltar
-    // entre puntos de emisión distintos de la misma organización.
+    // entre puntos de emisión distintos de la misma organización, y el tipo evita
+    // cruzar series de facturas con notas de crédito que comparten numeración.
     const prefix = number.slice(0, 8);
     const row = await FiscalInvoiceModel.findOne({
       where: {
         organization_id: organizationId,
+        document_type: documentType,
         number: { [Op.like]: `${prefix}%`, [Op.lt]: number },
       },
       order: [['number', 'DESC']],
@@ -51,10 +53,11 @@ export class SequelizeFiscalInvoiceStore implements FiscalInvoiceStore {
     return row ? toRecord(row) : null;
   }
 
-  async findBetween(organizationId: string, fromNumber: string, toNumber: string): Promise<FiscalInvoiceRecord[]> {
+  async findBetween(organizationId: string, fromNumber: string, toNumber: string, documentType: string): Promise<FiscalInvoiceRecord[]> {
     const rows = await FiscalInvoiceModel.findAll({
       where: {
         organization_id: organizationId,
+        document_type: documentType,
         number: { [Op.gt]: fromNumber, [Op.lt]: toNumber },
       },
     });

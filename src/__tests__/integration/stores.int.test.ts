@@ -17,6 +17,7 @@ function record(overrides: Partial<FiscalInvoiceRecord> = {}): FiscalInvoiceReco
     id: randomUUID(),
     organization_id: 'org-it',
     billing_invoice_id: randomUUID(),
+    document_type: '01',
     number: `001-001-${String(Math.floor(Math.random() * 1e9)).padStart(9, '0')}`,
     access_key: null,
     status: 'pending',
@@ -142,8 +143,10 @@ describe('Repositorios Sequelize contra MySQL', () => {
   it('findOtherWithNumber encuentra otra factura con el número, no la misma', async () => {
     const r = record({ number: '001-001-000000002' });
     await store.save(r);
-    expect(await store.findOtherWithNumber('org-it', r.number, r.billing_invoice_id)).toBeNull();
-    expect((await store.findOtherWithNumber('org-it', r.number, 'otra-factura'))?.id).toBe(r.id);
+    expect(await store.findOtherWithNumber('org-it', r.number, '01', r.billing_invoice_id)).toBeNull();
+    expect((await store.findOtherWithNumber('org-it', r.number, '01', 'otra-factura'))?.id).toBe(r.id);
+    // La nota de crédito 001-001-000000002 comparte número con la factura: es otra serie.
+    expect(await store.findOtherWithNumber('org-it', r.number, '04', 'otra-factura')).toBeNull();
   });
 
   it('findDue devuelve solo las vencidas del estado pedido, la más atrasada primero', async () => {

@@ -8,6 +8,8 @@ export interface FiscalInvoiceRecord {
   id: string;
   organization_id: string;
   billing_invoice_id: string;
+  /** Código SRI del comprobante ('01' factura, '04' nota de crédito). */
+  document_type: string;
   number: string;
   access_key: string | null;
   status: FiscalStatus;
@@ -35,12 +37,12 @@ export interface FiscalEvent {
 
 export interface FiscalInvoiceStore {
   findByBillingInvoiceId(billingInvoiceId: string): Promise<FiscalInvoiceRecord | null>;
-  /** Otra factura de billing con el mismo número en la organización. */
-  findOtherWithNumber(organizationId: string, number: string, billingInvoiceId: string): Promise<FiscalInvoiceRecord | null>;
-  /** La factura del mismo establecimiento/punto con el número inmediatamente anterior. */
-  findLatestBefore(organizationId: string, number: string): Promise<FiscalInvoiceRecord | null>;
-  /** Las facturas del mismo establecimiento/punto entre dos números, excluidos ambos. */
-  findBetween(organizationId: string, fromNumber: string, toNumber: string): Promise<FiscalInvoiceRecord[]>;
+  /** Otra factura de billing con el mismo número y tipo de documento en la organización. */
+  findOtherWithNumber(organizationId: string, number: string, documentType: string, billingInvoiceId: string): Promise<FiscalInvoiceRecord | null>;
+  /** La factura del mismo establecimiento/punto y tipo con el número inmediatamente anterior. */
+  findLatestBefore(organizationId: string, number: string, documentType: string): Promise<FiscalInvoiceRecord | null>;
+  /** Las facturas del mismo establecimiento/punto y tipo entre dos números, excluidos ambos. */
+  findBetween(organizationId: string, fromNumber: string, toNumber: string, documentType: string): Promise<FiscalInvoiceRecord[]>;
   /** Guarda el registro y, en la misma transacción, su evento. */
   save(record: FiscalInvoiceRecord, event?: FiscalEvent): Promise<void>;
   findDue(status: FiscalStatus, now: Date, limit: number): Promise<FiscalInvoiceRecord[]>;

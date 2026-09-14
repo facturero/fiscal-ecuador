@@ -10,7 +10,7 @@
  */
 
 export interface SeriesGaps {
-  /** `estab-ptoEmi`, p. ej. `001-001`. */
+  /** `estab-ptoEmi`, p. ej. `001-001` (o `tipo|estab-ptoEmi` si la serie se agrupa por tipo). */
   series: string;
   first: number;
   last: number;
@@ -21,14 +21,30 @@ export interface SeriesGaps {
   missingCount: number;
 }
 
+/**
+ * Número de comprobante tal cual viene de billing. La serie se deduce de los
+ * dos primeros grupos (`estab-ptoEmi`).
+ */
+export interface SequenceEntry {
+  number: string;
+  /**
+   * Serie a la que pertenece el número, si no se deduce del propio número.
+   * Las notas de crédito (04) comparten el formato con las facturas (01) pero
+   * tienen numeración propia, así que quien las distingue por tipo debe pasar
+   * `tipo|estab-ptoEmi` aquí para no reportar falsos huecos.
+   */
+  series?: string;
+}
+
 const NUMBER_RE = /^(\d{3})-(\d{3})-(\d{9})$/;
 
-export function findSequenceGaps(numbers: string[], limit = 100): SeriesGaps[] {
+export function findSequenceGaps(numbers: string[] | SequenceEntry[], limit = 100): SeriesGaps[] {
   const bySeries = new Map<string, Set<number>>();
-  for (const number of numbers) {
+  for (const entry of numbers) {
+    const number = typeof entry === 'string' ? entry : entry.number;
     const match = NUMBER_RE.exec(number);
     if (!match) continue;
-    const series = `${match[1]}-${match[2]}`;
+    const series = (typeof entry === 'string' ? undefined : entry.series) ?? `${match[1]}-${match[2]}`;
     const set = bySeries.get(series) ?? new Set<number>();
     set.add(Number(match[3]));
     bySeries.set(series, set);
