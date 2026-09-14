@@ -27,7 +27,7 @@ export interface FiscalInvoiceRecord {
 
 /** Lo que se publica en el outbox como `fiscal.ec.invoice.<type>`. */
 export interface FiscalEvent {
-  type: FiscalStatus | 'void_requires_action';
+  type: FiscalStatus | 'void_requires_action' | 'sequence_gap';
   message: string;
   /** Nadie lo va a arreglar solo: hace falta una persona. */
   requiresAttention: boolean;
@@ -37,6 +37,10 @@ export interface FiscalInvoiceStore {
   findByBillingInvoiceId(billingInvoiceId: string): Promise<FiscalInvoiceRecord | null>;
   /** Otra factura de billing con el mismo número en la organización. */
   findOtherWithNumber(organizationId: string, number: string, billingInvoiceId: string): Promise<FiscalInvoiceRecord | null>;
+  /** La factura del mismo establecimiento/punto con el número inmediatamente anterior. */
+  findLatestBefore(organizationId: string, number: string): Promise<FiscalInvoiceRecord | null>;
+  /** Las facturas del mismo establecimiento/punto entre dos números, excluidos ambos. */
+  findBetween(organizationId: string, fromNumber: string, toNumber: string): Promise<FiscalInvoiceRecord[]>;
   /** Guarda el registro y, en la misma transacción, su evento. */
   save(record: FiscalInvoiceRecord, event?: FiscalEvent): Promise<void>;
   findDue(status: FiscalStatus, now: Date, limit: number): Promise<FiscalInvoiceRecord[]>;
@@ -62,6 +66,8 @@ export interface CertificateStore {
 export interface DocumentStore {
   upload(params: {
     resourceType: 'fiscal_invoice' | 'fiscal_certificate';
+    /** document-service solo sirve el archivo a esta organización. */
+    organizationId: string;
     resourceId: string;
     category: string;
     originalName: string;

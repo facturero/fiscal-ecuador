@@ -1,11 +1,12 @@
 import { Hono } from 'hono';
 import { randomUUID } from 'node:crypto';
 import type { WhereOptions } from 'sequelize';
-import { requireOrganization, requirePermission, errorHandler, ContextVariables } from './middlewares.js';
+import { requireOrganization, requirePermission, requireAnyPermission, errorHandler, ContextVariables } from './middlewares.js';
 import { FiscalInvoiceModel, CertificateModel } from '../../infrastructure/persistence/models.js';
 import { config } from '../../infrastructure/config.js';
 import { validateP12Password, extractP12Validity } from '../../domain/xml-signer.js';
 import { ecuadorToday } from '../../domain/ecuador-time.js';
+import { findSequenceGaps } from '../../domain/sequence-gaps.js';
 import { encryptPassword } from '../../infrastructure/crypto/certificate-crypto.js';
 import type { DocumentStore, FiscalInvoiceRecord } from '../../application/ports.js';
 
@@ -93,6 +94,25 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
     },
   );
 
+  /**
+   * Huecos en la numeración que llegó a fiscal: facturas emitidas en billing
+   * cuyo evento no se procesó, así que el SRI no las conoce. Ver domain/sequence-gaps.ts.
+   * Va antes de `/:billingInvoiceId` para que no la capture esa ruta.
+   */
+  r.get('/fiscal-invoices/sequence-gaps',
+    requireOrganization(),
+    requirePermission('fiscal:read'),
+    async (c) => {
+      const rows = await FiscalInvoiceModel.findAll({
+        where: { organization_id: c.get('organizationId') },
+        attributes: ['number'],
+        raw: true,
+      });
+      const series = findSequenceGaps(rows.map((r) => r.number));
+      return c.json({ series, hasGaps: series.some((s) => s.missingCount > 0) });
+    },
+  );
+
   r.get('/fiscal-invoices/:billingInvoiceId',
     requireOrganization(),
     requirePermission('fiscal:read'),
@@ -158,9 +178,13 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
     },
   );
 
+  // `invoice:authorize` es el permiso de "mandar al SRI para autorizar", que es
+  // lo que hace un reintento. `fiscal:manage` se sigue aceptando (lo tenía antes)
+  // pero además deja tocar el certificado de firma, así que no debería hacer
+  // falta para reenviar una factura. FACTURACION-BRECHAS.md #33.
   r.post('/fiscal-invoices/:billingInvoiceId/retry',
     requireOrganization(),
-    requirePermission('fiscal:manage'),
+    requireAnyPermission('invoice:authorize', 'fiscal:manage'),
     async (c) => {
       const orgId = c.get('organizationId');
       const { billingInvoiceId } = c.req.param();
@@ -256,6 +280,7 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
       try {
         uploadedFileId = await deps.documents.upload({
           resourceType: 'fiscal_certificate',
+          organizationId: orgId,
           resourceId: orgId,
           category: 'certificado',
           originalName: file.name,

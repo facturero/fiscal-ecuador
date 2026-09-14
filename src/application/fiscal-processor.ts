@@ -167,6 +167,7 @@ export class FiscalInvoiceProcessor {
     try {
       record.signed_xml_file_id = await deps.documents.upload({
         resourceType: 'fiscal_invoice',
+        organizationId: payload.organizationId,
         resourceId: payload.invoiceId,
         category: 'comprobante-firmado',
         originalName: `factura-${payload.number}-firmado.xml`,
@@ -196,6 +197,16 @@ export class FiscalInvoiceProcessor {
         ? 'Enviada al SRI, esperando autorización'
         : 'El SRI ya tenía este comprobante; se consulta su autorización';
       await deps.store.save(record, { type: 'sent', message, requiresAttention: false });
+
+      const gap = await this.sequenceGapNote(payload.organizationId, payload.number);
+      if (gap) {
+        this.log.warn(`[fiscal-ecuador] ${gap}`);
+        // Solo auditoría: los huecos se dan de una en una y no requieren a nadie
+        // (el siguiente número ya está en uso). El aviso queda en el registro de
+        // eventos para investigar si se repiten.
+        await deps.store.save(record, { type: 'sequence_gap', message: gap, requiresAttention: false });
+      }
+
       return record;
     }
 
@@ -260,6 +271,32 @@ export class FiscalInvoiceProcessor {
     throw new FiscalValidationError('Sin certificado de firma activo: sube el archivo .p12 de la firma electrónica');
   }
 
+  /**
+   * ¿El secuencial del mismo establecimiento/punto saltó sin explicación? Los
+   * números salen de billing, uno por cada emisión: si este es más de uno que
+   * el anterior y algún número intermedio no tiene factura alguna (ni siquiera
+   * anulada o fallida), algo pasó — un evento perdido, un secuencial quemado a
+   * mano. Solo se avisa; el número ya está consumido. Ver ports.ts.
+   */
+  private async sequenceGapNote(organizationId: string, number: string): Promise<string | null> {
+    const prev = await this.deps.store.findLatestBefore(organizationId, number);
+    if (!prev) return null;
+
+    const seqOf = (n: string): number => {
+      const m = /^(\d{3})-(\d{3})-(\d{9})$/.exec(n);
+      return m ? Number(m[3]) : Number.NaN;
+    };
+    const from = seqOf(prev.number);
+    const to = seqOf(number);
+    if (!Number.isFinite(from) || !Number.isFinite(to) || to - from <= 1) return null;
+
+    const inBetween = await this.deps.store.findBetween(organizationId, prev.number, number);
+    const missing = to - from - 1 - inBetween.length;
+    if (missing <= 0) return null;
+
+    return `Secuencial ${prev.number} → ${number}: se saltaron ${missing} número(s) de la serie sin factura que lo explique`;
+  }
+
   /** Consulta la autorización de una factura ya recibida por el SRI. */
   async checkAuthorization(record: FiscalInvoiceRecord): Promise<FiscalInvoiceRecord> {
     const { deps } = this;
@@ -293,6 +330,7 @@ export class FiscalInvoiceProcessor {
         try {
           record.authorized_xml_file_id = await deps.documents.upload({
             resourceType: 'fiscal_invoice',
+            organizationId: record.organization_id,
             resourceId: record.billing_invoice_id,
             category: 'comprobante-autorizado',
             originalName: `factura-${record.number}-autorizado.xml`,

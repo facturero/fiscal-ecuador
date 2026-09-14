@@ -23,6 +23,7 @@ export class HttpDocumentStorage implements DocumentStore {
    */
   async upload(params: {
     resourceType: 'fiscal_invoice' | 'fiscal_certificate';
+    organizationId: string;
     resourceId: string;
     category: string;
     originalName: string;
@@ -32,6 +33,7 @@ export class HttpDocumentStorage implements DocumentStore {
     const formData = new FormData();
     formData.append('resourceType', params.resourceType);
     formData.append('resourceId', params.resourceId);
+    formData.append('organizationId', params.organizationId);
     formData.append('category', params.category);
     formData.append('originalName', params.originalName);
     formData.append('mimeType', params.mimeType);

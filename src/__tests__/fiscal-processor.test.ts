@@ -22,6 +22,19 @@ class MemoryStore implements FiscalInvoiceStore {
   async findOtherWithNumber(org: string, number: string, billingId: string) {
     return [...this.records.values()].find((x) => x.organization_id === org && x.number === number && x.billing_invoice_id !== billingId) ?? null;
   }
+  async findLatestBefore(org: string, number: string) {
+    const prefix = number.slice(0, 8);
+    const list = [...this.records.values()].filter((x) => x.organization_id === org && x.number.startsWith(prefix) && x.number < number);
+    if (!list.length) return null;
+    list.sort((a, b) => (a.number < b.number ? -1 : a.number > b.number ? 1 : 0));
+    return structuredClone(list[list.length - 1]);
+  }
+  async findBetween(org: string, fromNumber: string, toNumber: string) {
+    const prefix = fromNumber.slice(0, 8);
+    return [...this.records.values()]
+      .filter((x) => x.organization_id === org && x.number.startsWith(prefix) && x.number > fromNumber && x.number < toNumber)
+      .map((x) => structuredClone(x));
+  }
   async save(record: FiscalInvoiceRecord, event?: FiscalEvent) {
     this.records.set(record.id, structuredClone(record));
     if (event) this.events.push({ id: record.id, event });
@@ -169,6 +182,27 @@ describe('Emisión', () => {
     expect(record?.status).toBe('error');
     expect(record?.last_error).toMatch(/secuencial se reutilizó/);
     expect(t.sent).toHaveLength(1);
+  });
+});
+
+describe('Huecos de secuencial', () => {
+  it('salta varios números sin que nada los explique → aviso sequence_gap', async () => {
+    const t = setup();
+    await t.processor.processIssued(sampleInvoice());
+    const record = await t.processor.processIssued(sampleInvoice({ invoiceId: 'factura-2', number: '001-001-000000127', sequentialNumber: '000000127' }));
+    expect(record?.status).toBe('sent');
+    const gap = t.store.events.find((e) => e.event.type === 'sequence_gap');
+    expect(gap?.event.message).toContain('se saltaron 3 número(s)');
+    expect(gap?.event.requiresAttention).toBe(false);
+  });
+
+  it('números emitidos consecutivamente nunca avisan', async () => {
+    const t = setup();
+    for (let n = 123; n <= 127; n++) {
+      const pad = n.toString().padStart(9, '0');
+      await t.processor.processIssued(sampleInvoice({ invoiceId: `factura-${n}`, number: `001-001-${pad}`, sequentialNumber: pad }));
+    }
+    expect(t.store.events.some((e) => e.event.type === 'sequence_gap')).toBe(false);
   });
 });
 

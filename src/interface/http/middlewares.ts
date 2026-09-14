@@ -34,6 +34,17 @@ export function requirePermission(permission: string) {
   });
 }
 
+/** Basta con tener uno de los permisos. */
+export function requireAnyPermission(...required: string[]) {
+  return createMiddleware(async (c, next) => {
+    const permissions = c.get('permissions') as string[];
+    if (!permissions.includes('*') && !required.some((p) => permissions.includes(p))) {
+      return c.json({ code: 'UnauthorizedError', message: `Permiso requerido: ${required.join(' o ')}` }, 403);
+    }
+    await next();
+  });
+}
+
 export function errorHandler() {
   return async (c: any, next: () => Promise<void>) => {
     try {

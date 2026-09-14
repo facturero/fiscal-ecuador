@@ -36,6 +36,31 @@ export class SequelizeFiscalInvoiceStore implements FiscalInvoiceStore {
     return row ? toRecord(row) : null;
   }
 
+  async findLatestBefore(organizationId: string, number: string): Promise<FiscalInvoiceRecord | null> {
+    // El prefijo (establecimiento-punto) va delante del secuencial: comparar
+    // cadenas del mismo prefijo es comparar secuenciales. El LIKE evita saltar
+    // entre puntos de emisión distintos de la misma organización.
+    const prefix = number.slice(0, 8);
+    const row = await FiscalInvoiceModel.findOne({
+      where: {
+        organization_id: organizationId,
+        number: { [Op.like]: `${prefix}%`, [Op.lt]: number },
+      },
+      order: [['number', 'DESC']],
+    });
+    return row ? toRecord(row) : null;
+  }
+
+  async findBetween(organizationId: string, fromNumber: string, toNumber: string): Promise<FiscalInvoiceRecord[]> {
+    const rows = await FiscalInvoiceModel.findAll({
+      where: {
+        organization_id: organizationId,
+        number: { [Op.gt]: fromNumber, [Op.lt]: toNumber },
+      },
+    });
+    return rows.map(toRecord);
+  }
+
   /**
    * Registro y evento en una sola transacción: si el proceso muere entre las
    * dos escrituras no queda un estado sin evento ni al revés.
