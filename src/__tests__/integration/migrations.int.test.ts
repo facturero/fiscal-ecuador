@@ -4,6 +4,7 @@ import { columns, connect, createDatabase, dropDatabase, indexes, sequelizeCli }
 
 const PREVIOUS = '20260905000000-align-processed-events.cjs';
 const NEW = '20260913120000-fiscal-robustness.cjs';
+const CREDIT_NOTES = '20260913220000-credit-notes.cjs';
 
 function legacyRow(overrides: Record<string, unknown> = {}) {
   const now = new Date();
@@ -80,7 +81,11 @@ describe('Migración 20260913120000-fiscal-robustness', () => {
   it('crea los índices y conserva el único de access_key', async () => {
     const idx = await indexes(db, 'fiscal_invoices');
     const byColumns = (cols: string[]) => idx.find((i) => i.columns.join(',') === cols.join(','));
-    expect(byColumns(['organization_id', 'number'])?.unique).toBe(true);
+    // credit-notes (20260913220000) sustituyó el UNIQUE (organization_id, number)
+    // por (organization_id, document_type, number): factura y nota de crédito
+    // comparten serie en la misma organización, así que sin el tipo de documento
+    // el secuencial reutilizado no se podía distinguir.
+    expect(byColumns(['organization_id', 'document_type', 'number'])?.unique).toBe(true);
     expect(byColumns(['status', 'next_check_at'])).toBeDefined();
     expect(byColumns(['organization_id', 'created_at'])).toBeDefined();
     expect(byColumns(['access_key'])?.unique).toBe(true);
@@ -117,7 +122,11 @@ describe('Migración 20260913120000-fiscal-robustness', () => {
 
   it('se puede deshacer y volver a aplicar cuando no hay claves NULL', async () => {
     await query(db, 'DELETE FROM fiscal_invoices WHERE access_key IS NULL');
-    await sequelizeCli(db, 'db:migrate:undo');
+    // El undo debe seguir el orden inverso del encadenado: credit-notes primero
+    // (su down recupera el índice que fiscal-robustness intenta quitar en el
+    // suyo) y después fiscal-robustness. Un undo a secas solo desharía la última.
+    await sequelizeCli(db, 'db:migrate:undo', ['--name', CREDIT_NOTES]);
+    await sequelizeCli(db, 'db:migrate:undo', ['--name', NEW]);
 
     const reverted = await columns(db, 'fiscal_invoices');
     expect(reverted.access_key.IS_NULLABLE).toBe('NO');

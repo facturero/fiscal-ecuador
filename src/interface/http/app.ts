@@ -7,6 +7,9 @@ import { config } from '../../infrastructure/config.js';
 import { validateP12Password, extractP12Validity } from '../../domain/xml-signer.js';
 import { ecuadorToday } from '../../domain/ecuador-time.js';
 import { findSequenceGaps } from '../../domain/sequence-gaps.js';
+import { rideQrUrl } from '../../domain/ride-qr.js';
+import { renderRidePdf, type RidePdfData } from '../../domain/ride-pdf.js';
+import type { InvoiceIssuedPayload } from '../../domain/types.js';
 import { encryptPassword } from '../../infrastructure/crypto/certificate-crypto.js';
 import type { DocumentStore, FiscalInvoiceRecord } from '../../application/ports.js';
 
@@ -55,6 +58,8 @@ function toFiscalInvoiceDTO(invoice: FiscalInvoiceModel | FiscalInvoiceRecord) {
     sri_messages: sri?.mensajes ?? [],
     has_signed_xml: Boolean(invoice.signed_xml_file_id),
     has_authorized_xml: Boolean(invoice.authorized_xml_file_id || sri?.xmlAutorizado),
+    // El RIDE se genera al vuelo y requiere autorización + datos para armarlo.
+    ride_available: invoice.status === 'authorized' && Boolean(invoice.access_key && invoice.original_payload),
     created_at: invoice.created_at,
     updated_at: invoice.updated_at,
   };
@@ -177,6 +182,36 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
       return new Response(new Uint8Array(body), {
         headers: {
           'Content-Type': 'application/xml; charset=utf-8',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+        },
+      });
+    },
+  );
+
+  /**
+   * El RIDE (PDF tributario) se genera al vuelo desde `original_payload` y los
+   * datos de autorización. Solo existe para comprobantes AUTORIZADOS: emitirlo
+   * antes sería un documento sin validez que confundiría. Ver domain/ride-pdf.ts
+   * para el porqué de generarlo bajo demanda en vez de guardarlo.
+   */
+  r.get('/fiscal-invoices/:id/ride',
+    requireOrganization(),
+    requirePermission('fiscal:read'),
+    async (c) => {
+      const invoice = await findOwned(c.req.param('id'), c.get('organizationId'));
+      if (!invoice) return c.json({ code: 'NotFoundError', message: 'Factura fiscal no encontrada' }, 404);
+      if (invoice.status !== 'authorized') {
+        return c.json({ code: 'NotReadyError', message: 'El RIDE solo está disponible para comprobantes autorizados por el SRI' }, 404);
+      }
+      if (!invoice.access_key || !invoice.original_payload) {
+        return c.json({ code: 'NotReadyError', message: 'Faltan los datos de autorización para generar el RIDE' }, 404);
+      }
+
+      const pdf = await renderRidePdf(toRidePdfData(invoice));
+      const filename = `ride-${invoice.number.replace(/\s+/g, '')}.pdf`;
+      return new Response(new Uint8Array(pdf), {
+        headers: {
+          'Content-Type': 'application/pdf',
           'Content-Disposition': `attachment; filename="${filename}"`,
         },
       });
@@ -330,6 +365,58 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
 
 async function findOwned(id: string, organizationId: string): Promise<FiscalInvoiceModel | null> {
   return FiscalInvoiceModel.findOne({ where: { id, organization_id: organizationId } });
+}
+
+/**
+ * Arma el RIDE desde lo que fiscal guardó: el payload original (datos fiscales
+ * congelados al emitir) + la autorización. El QR lleva la URL configurada
+ * (RIDE_QR_URL) con la clave de acceso precargada.
+ */
+function toRidePdfData(invoice: FiscalInvoiceModel): RidePdfData {
+  const payload = invoice.original_payload as InvoiceIssuedPayload;
+  return {
+    documentType: invoice.document_type,
+    number: invoice.number,
+    accessKey: invoice.access_key!,
+    authorizationNumber: invoice.authorization_number || invoice.access_key!,
+    authorizationDate: invoice.authorization_date ? invoice.authorization_date.toISOString() : null,
+    environment: config.SRI_ENVIRONMENT,
+    currency: payload.currencyCode,
+    subtotalCents: payload.subtotalCents,
+    taxTotalCents: payload.taxTotalCents,
+    totalCents: payload.totalCents,
+    qrContent: rideQrUrl(invoice.access_key!, config.RIDE_QR_URL),
+    issuer: payload.issuerSnapshot
+      ? {
+          legalName: payload.issuerSnapshot.legalName,
+          tradeName: payload.issuerSnapshot.tradeName,
+          taxId: payload.issuerSnapshot.taxId,
+          address: payload.issuerSnapshot.address,
+          establishmentCode: payload.issuerSnapshot.establishmentCode,
+          emissionPointCode: payload.issuerSnapshot.emissionPointCode,
+        }
+      : null,
+    customer: payload.customerSnapshot
+      ? {
+          businessName: payload.customerSnapshot.businessName,
+          identification: payload.customerSnapshot.identification,
+          email: payload.customerSnapshot.email,
+          phone: payload.customerSnapshot.phone,
+        }
+      : null,
+    lines: payload.lines.map((line) => ({
+      description: line.description,
+      quantity: line.quantity,
+      unitPriceCents: line.unitPriceCents,
+      discountCents: line.discountCents,
+      subtotalCents: line.subtotalCents,
+      taxes: line.taxes.map((tax) => ({
+        kind: tax.kind,
+        rateSnapshot: tax.rateSnapshot,
+        amountCents: tax.amountCents,
+      })),
+    })),
+  };
 }
 
 export function createApp(deps: AppDependencies): Hono {

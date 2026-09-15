@@ -18,6 +18,18 @@ export const SRI_ENDPOINTS = {
   },
 } as const;
 
+/**
+ * Base de la URL que codifica el QR del RIDE (portal de consulta del SRI con la
+ * clave de acceso precargada). El contenido EXACTO del QR lo define la Ficha
+ * Técnica ANEXO 2, que no está accesible desde este entorno: estas URLs son la
+ * convención habitual del ecosistema ecuatoriano y se dejan como default
+ * configurable (`RIDE_QR_URL`) para corregirlas en un solo lugar si hacen falta.
+ */
+export const RIDE_QR_BASE_URL = {
+  pruebas: 'https://celcer.sri.gob.ec/comprobantes-electronico/comprobantes/consulta',
+  produccion: 'https://www.sri.gob.ec/comprobantes-electronico/comprobantes/consulta',
+} as const;
+
 const DEV_INTERNAL_SECRET = 'dev-internal-secret-change-me';
 const DEV_CERT_MASTER_KEY = 'dev-cert-master-key-change-me';
 
@@ -47,12 +59,16 @@ const envSchema = z.object({
   SRI_AUTHORIZATION_URL: z.string().optional(),
   SRI_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
 
+  // Vacía = default del ambiente. Para el QR del RIDE (ver RIDE_QR_BASE_URL).
+  RIDE_QR_URL: z.string().optional(),
+
   CERTIFICATE_MASTER_KEY: z.string().default(DEV_CERT_MASTER_KEY),
 });
 
-export type Env = Omit<z.infer<typeof envSchema>, 'SRI_RECEPTION_URL' | 'SRI_AUTHORIZATION_URL'> & {
+export type Env = Omit<z.infer<typeof envSchema>, 'SRI_RECEPTION_URL' | 'SRI_AUTHORIZATION_URL' | 'RIDE_QR_URL'> & {
   SRI_RECEPTION_URL: string;
   SRI_AUTHORIZATION_URL: string;
+  RIDE_QR_URL: string;
 };
 
 /**
@@ -71,6 +87,7 @@ export function resolveConfig(source: NodeJS.ProcessEnv): { env?: Env; problems:
     ...data,
     SRI_RECEPTION_URL: data.SRI_RECEPTION_URL || endpoints.reception,
     SRI_AUTHORIZATION_URL: data.SRI_AUTHORIZATION_URL || endpoints.authorization,
+    RIDE_QR_URL: data.RIDE_QR_URL || RIDE_QR_BASE_URL[data.SRI_ENVIRONMENT],
   };
 
   const problems: string[] = [];

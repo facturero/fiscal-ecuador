@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveConfig, SRI_ENDPOINTS } from '../infrastructure/config.js';
+import { resolveConfig, SRI_ENDPOINTS, RIDE_QR_BASE_URL } from '../infrastructure/config.js';
 
 describe('Configuración del SRI', () => {
   it('pruebas apunta a celcer', () => {
@@ -39,5 +39,18 @@ describe('Configuración del SRI', () => {
 
   it('en desarrollo los valores por defecto no avisan', () => {
     expect(resolveConfig({}).warnings).toEqual([]);
+  });
+
+  it('el QR del RIDE usa el default del ambiente', () => {
+    const { env } = resolveConfig({ SRI_ENVIRONMENT: 'pruebas' });
+    expect(env?.RIDE_QR_URL).toBe(RIDE_QR_BASE_URL.pruebas);
+  });
+
+  it('RIDE_QR_URL se puede sobreescribir', () => {
+    const { env } = resolveConfig({
+      SRI_ENVIRONMENT: 'produccion',
+      RIDE_QR_URL: 'https://verifica.miempresa.com/ride',
+    });
+    expect(env?.RIDE_QR_URL).toBe('https://verifica.miempresa.com/ride');
   });
 });
