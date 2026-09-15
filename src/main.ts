@@ -21,6 +21,7 @@ async function main(): Promise<void> {
   await sequelize.authenticate();
   await sequelize.sync();
 
+  let relay: OutboxRelay | undefined;
   const app = createApp({
     corsOrigin: config.CORS_ORIGIN,
     documents: new HttpDocumentStorage(config.DOCUMENT_SERVICE_URL, config.INTERNAL_SERVICE_SECRET),
@@ -40,12 +41,13 @@ async function main(): Promise<void> {
   console.log(`[fiscal-ecuador] corriendo en puerto ${config.PORT}`);
 
   if (config.RABBITMQ_URL) {
-    const relay = new OutboxRelay({
+    relay = new OutboxRelay({
       sequelize,
       rabbitmqUrl: config.RABBITMQ_URL,
       exchange: 'crm.events',
     });
     await relay.start();
+    fiscalInvoiceStore.setOnCommit((tx) => relay?.attachToTransaction(tx));
     console.log('[fiscal-ecuador] OutboxRelay iniciado.');
   } else {
     console.log('[fiscal-ecuador] RABBITMQ_URL no configurado, outbox relay desactivado.');

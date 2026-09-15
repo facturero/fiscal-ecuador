@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Op } from 'sequelize';
+import { Op, Transaction } from 'sequelize';
 import { sequelize } from './sequelize.js';
 import { CertificateModel, FiscalInvoiceModel, OutboxModel } from './models.js';
 import type {
@@ -24,6 +24,13 @@ function toRecord(model: FiscalInvoiceModel): FiscalInvoiceRecord {
 }
 
 export class SequelizeFiscalInvoiceStore implements FiscalInvoiceStore {
+  /** El relay publica el outbox al momento del commit; se engancha desde main. */
+  private onCommit: ((tx: Transaction) => void) | undefined;
+
+  setOnCommit(fn: (tx: Transaction) => void): void {
+    this.onCommit = fn;
+  }
+
   async findByBillingInvoiceId(billingInvoiceId: string): Promise<FiscalInvoiceRecord | null> {
     const row = await FiscalInvoiceModel.findOne({ where: { billing_invoice_id: billingInvoiceId } });
     return row ? toRecord(row) : null;
@@ -76,6 +83,9 @@ export class SequelizeFiscalInvoiceStore implements FiscalInvoiceStore {
    */
   async save(record: FiscalInvoiceRecord, event?: FiscalEvent): Promise<void> {
     await sequelize.transaction(async (transaction) => {
+      // El relay publica el outbox justo tras el commit; sin este enganche los
+      // eventos fiscales esperan los 30s del timer de respaldo del relay.
+      this.onCommit?.(transaction);
       const { id, ...fields } = record;
       const [updated] = await FiscalInvoiceModel.update(fields as never, { where: { id }, transaction });
       if (updated === 0) {
