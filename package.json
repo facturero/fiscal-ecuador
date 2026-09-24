@@ -14,7 +14,7 @@
     "db:migrate:undo": "npx sequelize-cli --config sequelize.config.cjs db:migrate:undo"
   },
   "dependencies": {
-    "@facturero/outbox-relay": "^0.2.2",
+    "@facturero/outbox-relay": "^0.2.3",
     "@hono/node-server": "^1.13.0",
     "@hono/zod-validator": "^0.4.0",
     "@opentelemetry/api": "^1.9.1",
