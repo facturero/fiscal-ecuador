@@ -149,9 +149,9 @@ spec:
             requests:
               memory: "128Mi"
               cpu: "100m"
-            limits:
-              memory: "256Mi"
-              cpu: "300m"
+            # Sin `limits` a proposito: un tope de CPU de 300m estrangulaba al servicio (throttle)
+            # y las pruebas de stress-petitions medían el limite de Kubernetes, no la capacidad
+            # del codigo, con el nodo casi ocioso. Se conservan los `requests` (reserva).
           livenessProbe:
             httpGet:
               path: /health
