@@ -1,4 +1,5 @@
 import { createMiddleware } from 'hono/factory';
+import { runWithActor } from '@facturero/outbox-relay';
 
 export interface ContextVariables {
   userId: string;
@@ -20,7 +21,16 @@ export function requireOrganization() {
     c.set('countryCode', c.req.header('X-Country-Code') || 'EC');
     const perms = c.req.header('X-Permissions');
     c.set('permissions', perms ? perms.split(',') : []);
-    await next();
+    // Quién actúa viaja hasta el outbox: así los eventos de auditoría de esta petición llevan usuario, correo e IP.
+    await runWithActor(
+      {
+        actorId: c.req.header('X-User-Id') || null,
+        actorEmail: c.req.header('X-User-Email') || null,
+        actorIp: c.req.header('X-Client-Ip') || null,
+        requestId: c.req.header('X-Request-Id') || null,
+      },
+      () => next(),
+    );
   });
 }
 

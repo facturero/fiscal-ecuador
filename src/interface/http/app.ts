@@ -11,6 +11,9 @@ import { rideQrUrl } from '../../domain/ride-qr.js';
 import { renderRidePdf, type RidePdfData } from '../../domain/ride-pdf.js';
 import type { InvoiceIssuedPayload } from '../../domain/types.js';
 import { encryptPassword } from '../../infrastructure/crypto/certificate-crypto.js';
+import { sequelize } from '../../infrastructure/persistence/sequelize.js';
+import { recordAuditEvent } from '../../infrastructure/messaging/audit-outbox.js';
+import { certificateRevokedEvent, certificateUploadedEvent, invoiceRetryRequestedEvent } from '../../domain/audit-events.js';
 import type { DocumentStore, FiscalInvoiceRecord } from '../../application/ports.js';
 
 type Vars = { Variables: ContextVariables };
@@ -242,6 +245,8 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
         return c.json({ code: 'NotImplementedError', message: 'El reintento no está disponible' }, 501);
       }
 
+      await recordAuditEvent(invoiceRetryRequestedEvent(invoice.get({ plain: true })));
+
       const result = await deps.onRetry(billingInvoiceId);
       return c.json({
         message: result?.status === 'error' ? 'Se reintentó y sigue en error' : 'Factura reintentada',
@@ -331,16 +336,24 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
         return c.json({ code: 'UploadError', message: `Error subiendo certificado: ${(uploadErr as Error).message}` }, 500);
       }
 
-      const cert = await CertificateModel.create({
-        id: randomUUID(),
-        organization_id: orgId,
-        alias,
-        p12_file_id: uploadedFileId,
-        password_encrypted: encryptPassword(password, config.CERTIFICATE_MASTER_KEY),
-        valid_from: validFrom,
-        valid_until: validUntil,
-        status: 'active',
-        created_at: new Date(),
+      // El certificado y su huella en la bitácora se guardan juntos o no se guarda ninguno.
+      const cert = await sequelize.transaction(async (transaction) => {
+        const created = await CertificateModel.create(
+          {
+            id: randomUUID(),
+            organization_id: orgId,
+            alias,
+            p12_file_id: uploadedFileId,
+            password_encrypted: encryptPassword(password, config.CERTIFICATE_MASTER_KEY),
+            valid_from: validFrom,
+            valid_until: validUntil,
+            status: 'active',
+            created_at: new Date(),
+          },
+          { transaction },
+        );
+        await recordAuditEvent(certificateUploadedEvent(created), transaction);
+        return created;
       });
 
       return c.json(toCertificateDTO(cert), 201);
@@ -355,7 +368,11 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
       const { id } = c.req.param();
       const cert = await CertificateModel.findOne({ where: { id, organization_id: orgId } });
       if (!cert) return c.json({ code: 'NotFoundError', message: 'Certificado no encontrado' }, 404);
-      await cert.update({ status: 'revoked' });
+      const previousStatus = cert.status;
+      await sequelize.transaction(async (transaction) => {
+        await cert.update({ status: 'revoked' }, { transaction });
+        await recordAuditEvent(certificateRevokedEvent({ ...cert.get({ plain: true }), status: previousStatus }), transaction);
+      });
       return c.json({ message: 'Certificado revocado' });
     },
   );
