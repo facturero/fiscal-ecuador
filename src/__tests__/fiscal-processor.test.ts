@@ -1,132 +1,9 @@
-import { beforeEach, describe, expect, it } from 'vitest';
-import { FiscalInvoiceProcessor, RETRY_POLICY, backoffDelayMs } from '../application/fiscal-processor.js';
-import type {
-  FiscalEvent,
-  FiscalInvoiceRecord,
-  FiscalInvoiceStore,
-  FiscalStatus,
-  SigningCertificate,
-} from '../application/ports.js';
-import type { SriAuthorizationResponse, SriReceptionResponse } from '../infrastructure/http/sri-client.js';
+import { describe, expect, it } from 'vitest';
+import { RETRY_POLICY, backoffDelayMs } from '../application/fiscal-processor.js';
 import { SriUnavailableError } from '../infrastructure/http/sri-client.js';
-import { sampleInvoice, sampleCreditNote, TAX_CODES } from './fixtures.js';
-
-class MemoryStore implements FiscalInvoiceStore {
-  records = new Map<string, FiscalInvoiceRecord>();
-  events: Array<{ id: string; event: FiscalEvent }> = [];
-
-  async findByBillingInvoiceId(id: string) {
-    const r = [...this.records.values()].find((x) => x.billing_invoice_id === id);
-    return r ? structuredClone(r) : null;
-  }
-  async findOtherWithNumber(org: string, number: string, documentType: string, billingId: string) {
-    return [...this.records.values()]
-      .find((x) => x.organization_id === org && x.document_type === documentType && x.number === number && x.billing_invoice_id !== billingId) ?? null;
-  }
-  async findLatestBefore(org: string, number: string, documentType: string) {
-    const prefix = number.slice(0, 8);
-    const list = [...this.records.values()]
-      .filter((x) => x.organization_id === org && x.document_type === documentType && x.number.startsWith(prefix) && x.number < number);
-    if (!list.length) return null;
-    list.sort((a, b) => (a.number < b.number ? -1 : a.number > b.number ? 1 : 0));
-    return structuredClone(list[list.length - 1]);
-  }
-  async findBetween(org: string, fromNumber: string, toNumber: string, documentType: string) {
-    const prefix = fromNumber.slice(0, 8);
-    return [...this.records.values()]
-      .filter((x) => x.organization_id === org && x.document_type === documentType && x.number.startsWith(prefix) && x.number > fromNumber && x.number < toNumber)
-      .map((x) => structuredClone(x));
-  }
-  async save(record: FiscalInvoiceRecord, event?: FiscalEvent) {
-    this.records.set(record.id, structuredClone(record));
-    if (event) this.events.push({ id: record.id, event });
-  }
-  async findDue(status: FiscalStatus, now: Date) {
-    return [...this.records.values()]
-      .filter((r) => r.status === status && r.next_check_at && r.next_check_at <= now)
-      .map((r) => structuredClone(r));
-  }
-  async findStalePending(before: Date) {
-    return [...this.records.values()]
-      .filter((r) => r.status === 'pending' && r.updated_at < before && !r.billing_voided_at)
-      .map((r) => structuredClone(r));
-  }
-  only(): FiscalInvoiceRecord {
-    return [...this.records.values()][0];
-  }
-  eventTypes(): string[] {
-    return this.events.map((e) => e.event.type);
-  }
-}
-
-const RECIBIDA: SriReceptionResponse = { estado: 'RECIBIDA' };
-
-function certificate(overrides: Partial<SigningCertificate> = {}): SigningCertificate {
-  return {
-    id: 'cert-1', p12FileId: 'file-p12', passwordEncrypted: 'enc', validFrom: '2026-01-01', validUntil: '2027-01-01',
-    status: 'active', createdAt: new Date('2026-01-01'), ...overrides,
-  };
-}
-
-function setup(options: {
-  certificates?: SigningCertificate[];
-  reception?: Array<SriReceptionResponse | Error>;
-  authorization?: Array<SriAuthorizationResponse | Error>;
-  taxCodes?: Record<string, string> | undefined;
-} = {}) {
-  let now = new Date('2026-09-13T17:30:00Z');
-  const store = new MemoryStore();
-  const sent: string[] = [];
-  const queried: string[] = [];
-  const uploads: Array<{ category: string; resourceType: string; originalName: string }> = [];
-  const expired: string[] = [];
-  const reception = options.reception ?? [RECIBIDA];
-  const authorization = options.authorization ?? [];
-  let ids = 0;
-
-  const processor = new FiscalInvoiceProcessor({
-    store,
-    certificates: {
-      listActive: async () => options.certificates ?? [certificate()],
-      markExpired: async (list) => { expired.push(...list); },
-    },
-    documents: {
-      upload: async (p) => { uploads.push({ category: p.category, resourceType: p.resourceType, originalName: p.originalName }); return `file-${uploads.length}`; },
-      download: async () => Buffer.from('p12'),
-    },
-    catalogs: {
-      taxCodesById: async () => ('taxCodes' in options ? options.taxCodes : TAX_CODES),
-      identificationTypeCode: async () => 'RUC',
-      issuerProfile: async () => ({ obligadoContabilidad: 'SI' }),
-    },
-    sri: {
-      send: async (xml) => {
-        sent.push(xml);
-        const next = reception.length > 1 ? reception.shift()! : reception[0];
-        if (next instanceof Error) throw next;
-        return next;
-      },
-      query: async (key) => {
-        queried.push(key);
-        const next = authorization.shift() ?? { estado: 'EN PROCESAMIENTO' as const };
-        if (next instanceof Error) throw next;
-        return next;
-      },
-    },
-    signer: { sign: (xml) => ({ signedXml: xml.replace(/<\/[A-Za-z_][\w.-]*>$/, '<ds:Signature/></comprobante>') }) },
-    decryptPassword: () => 'clave',
-    environment: 'pruebas',
-    now: () => now,
-    newId: () => `fiscal-${++ids}`,
-    log: { log: () => {}, warn: () => {}, error: () => {} },
-  });
-
-  return {
-    processor, store, sent, queried, uploads, expired,
-    advance(ms: number) { now = new Date(now.getTime() + ms); },
-    get now() { return now; },
-  };
-}
+import type { SriAuthorizationResponse } from '../infrastructure/http/sri-client.js';
+import { sampleInvoice, sampleCreditNote, sampleDebitNote } from './fixtures.js';
+import { RECIBIDA, certificate, setup } from './processor-harness.js';
 
 describe('Emisión', () => {
   it('firma, envía y deja la factura en espera de autorización', async () => {
@@ -238,6 +115,7 @@ describe('Notas de crédito', () => {
       id: 'orig-sin-clave',
       organization_id: original.organizationId,
       billing_invoice_id: original.invoiceId,
+      source: 'billing',
       document_type: '01',
       number: original.number,
       access_key: null,
@@ -270,6 +148,79 @@ describe('Notas de crédito', () => {
     const record = await t.processor.processIssued(sampleCreditNote());
     expect(record?.status).toBe('sent');
     expect(t.sent).toHaveLength(2);
+  });
+});
+
+describe('Notas de débito', () => {
+  it('emite la nota de débito referenciando la factura original, con su propio tipo y secuencia', async () => {
+    const t = setup();
+    await t.processor.processIssued(sampleInvoice());
+    const record = await t.processor.processIssued(sampleDebitNote());
+
+    expect(record?.status).toBe('sent');
+    expect(record?.document_type).toBe('05');
+    expect(t.sent).toHaveLength(2);
+    const nd = t.sent[1]!;
+    expect(nd).toContain('<notaDebito id="comprobante"');
+    expect(nd).toContain('<codDoc>05</codDoc>');
+    expect(nd).toContain('<numDocModificado>001-001-000000123</numDocModificado>');
+    expect(nd).toContain('<codDocModificado>01</codDocModificado>');
+    expect(nd).toContain('<razon>Intereses por mora</razon>');
+    // La clave lleva el tipo 05 en su posición.
+    expect(record?.access_key?.slice(8, 10)).toBe('05');
+    expect(t.uploads.at(-1)).toEqual({ category: 'comprobante-firmado', resourceType: 'fiscal_invoice', originalName: 'nota-debito-001-001-000000125-firmado.xml' });
+  });
+
+  it('no necesita motivo general: sus motivos son las líneas', async () => {
+    const t = setup();
+    await t.processor.processIssued(sampleInvoice());
+    const record = await t.processor.processIssued(sampleDebitNote({ creditNoteReason: null }));
+    expect(record?.status).toBe('sent');
+  });
+
+  it('factura, nota de crédito y nota de débito pueden compartir número: son series distintas', async () => {
+    const t = setup();
+    const pad = '000000300';
+    await t.processor.processIssued(sampleInvoice({ invoiceId: 'factura-300', number: `001-001-${pad}`, sequentialNumber: pad }));
+    const nc = await t.processor.processIssued(sampleCreditNote({ invoiceId: 'nc-300', relatedInvoiceId: 'factura-300', number: `001-001-${pad}`, sequentialNumber: pad }));
+    const nd = await t.processor.processIssued(sampleDebitNote({ invoiceId: 'nd-300', relatedInvoiceId: 'factura-300', number: `001-001-${pad}`, sequentialNumber: pad }));
+    expect([nc?.status, nd?.status]).toEqual(['sent', 'sent']);
+    expect([nc?.document_type, nd?.document_type]).toEqual(['04', '05']);
+  });
+
+  it('si el original no tiene comprobante fiscal, no se envía', async () => {
+    const t = setup();
+    const record = await t.processor.processIssued(sampleDebitNote());
+    expect(record?.status).toBe('error');
+    expect(record?.last_error).toMatch(/nota de débito no tiene comprobante fiscal|no tiene comprobante fiscal/);
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it('sin la factura que modifica no se envía', async () => {
+    const t = setup();
+    await t.processor.processIssued(sampleInvoice());
+    const record = await t.processor.processIssued(sampleDebitNote({ relatedInvoiceId: undefined }));
+    expect(record?.status).toBe('error');
+    expect(record?.last_error).toMatch(/nota de débito no indica la factura/);
+  });
+
+  it('una nota de débito que no cuadra no llega al SRI', async () => {
+    const t = setup();
+    await t.processor.processIssued(sampleInvoice());
+    const record = await t.processor.processIssued(sampleDebitNote({ totalCents: 99_99 }));
+    expect(record?.status).toBe('error');
+    expect(record?.last_error).toMatch(/El total/);
+    expect(t.sent).toHaveLength(1);
+  });
+
+  it('autorizada guarda el XML con el nombre de la nota de débito', async () => {
+    const t = setup({ authorization: [{ estado: 'AUTORIZADO', numeroAutorizacion: '1309202605', xmlAutorizado: '<autorizacion/>' }] });
+    await t.processor.processIssued(sampleInvoice());
+    const nd = await t.processor.processIssued(sampleDebitNote());
+    t.advance(RETRY_POLICY.firstAuthorizationCheckMs + 1);
+    const checked = await t.processor.checkAuthorization(nd!);
+    expect(checked.status).toBe('authorized');
+    expect(t.uploads.at(-1)?.originalName).toBe('nota-debito-001-001-000000125-autorizado.xml');
   });
 });
 

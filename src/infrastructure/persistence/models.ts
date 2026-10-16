@@ -11,6 +11,7 @@ export class FiscalInvoiceModel extends Model<
   declare organization_id: string;
   declare billing_invoice_id: string;
   declare document_type: string;
+  declare source: 'billing' | 'fiscal';
   declare number: string;
   declare access_key: string | null;
   declare status: 'pending' | 'sent' | 'authorized' | 'rejected' | 'error';
@@ -34,6 +35,7 @@ FiscalInvoiceModel.init(
     organization_id: { type: DataTypes.CHAR(36), allowNull: false },
     billing_invoice_id: { type: DataTypes.CHAR(36), allowNull: false, unique: true },
     document_type: { type: DataTypes.CHAR(2), allowNull: false, defaultValue: '01' },
+    source: { type: DataTypes.STRING(10), allowNull: false, defaultValue: 'billing' },
     number: { type: DataTypes.STRING(30), allowNull: false },
     access_key: { type: DataTypes.CHAR(49), allowNull: true, unique: true },
     status: { type: DataTypes.ENUM('pending', 'sent', 'authorized', 'rejected', 'error'), allowNull: false, defaultValue: 'pending' },
@@ -51,6 +53,39 @@ FiscalInvoiceModel.init(
     updated_at: DataTypes.DATE,
   },
   { sequelize, tableName: 'fiscal_invoices', timestamps: false },
+);
+
+// ── Serie de numeración de los comprobantes propios de fiscal ─────────────
+
+export class FiscalSequenceModel extends Model<
+  InferAttributes<FiscalSequenceModel>,
+  InferCreationAttributes<FiscalSequenceModel>
+> {
+  declare id: string;
+  declare organization_id: string;
+  declare establishment_code: string;
+  declare emission_point_code: string;
+  declare document_type: string;
+  declare current_value: number;
+  declare updated_at: Date;
+}
+
+FiscalSequenceModel.init(
+  {
+    id: { type: DataTypes.CHAR(36), primaryKey: true },
+    organization_id: { type: DataTypes.CHAR(36), allowNull: false },
+    establishment_code: { type: DataTypes.CHAR(3), allowNull: false },
+    emission_point_code: { type: DataTypes.CHAR(3), allowNull: false },
+    document_type: { type: DataTypes.CHAR(2), allowNull: false },
+    current_value: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false, defaultValue: 0 },
+    updated_at: { type: DataTypes.DATE, allowNull: false },
+  },
+  {
+    sequelize,
+    tableName: 'fiscal_sequences',
+    timestamps: false,
+    indexes: [{ unique: true, name: 'fiscal_sequences_series_unique', fields: ['organization_id', 'establishment_code', 'emission_point_code', 'document_type'] }],
+  },
 );
 
 // ── Certificate ───────────────────────────────────────────────────────────

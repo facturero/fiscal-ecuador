@@ -1,24 +1,28 @@
 /** Código SRI del tipo de comprobante. Solo los que este servicio sabe construir. */
-export type SriDocumentType = '01' | '04';
+export type SriDocumentType = '01' | '04' | '05' | '06' | '07';
 
 /**
- * Código SRI del comprobante de una factura emitida. billing solo emite
- * facturas (01) y notas de crédito (04); cualquier otro valor (o la ausencia
- * del campo, que es como venían los eventos antes de las notas de crédito) es
- * una factura.
+ * Código SRI del comprobante que billing emite: factura (01), nota de crédito (04) o nota de débito (05); cualquier otro valor (o
+ * la ausencia del campo, que es como venían los eventos antes de las notas de crédito) es una factura. La guía de remisión (06) y
+ * la retención (07) NO pasan por billing: las emite este servicio directamente.
  */
 export function documentTypeOf(payload: Pick<InvoiceIssuedPayload, 'documentTypeCode'>): SriDocumentType {
-  return payload.documentTypeCode === '04' ? '04' : '01';
+  return payload.documentTypeCode === '04' || payload.documentTypeCode === '05' ? payload.documentTypeCode : '01';
+}
+
+/** Notas que modifican un comprobante anterior: necesitan su número y su fecha de emisión. */
+export function modifiesAnotherDocument(type: SriDocumentType): boolean {
+  return type === '04' || type === '05';
 }
 
 export interface InvoiceIssuedPayload {
   invoiceId: string;
   number: string;
   sequentialNumber: string;
-  /** Código SRI del tipo de comprobante (`01` factura, `04` nota de crédito). Factura si falta. */
-  documentTypeCode?: '01' | '04';
+  /** Código SRI del tipo de comprobante (`01` factura, `04` nota de crédito, `05` nota de débito). Factura si falta. */
+  documentTypeCode?: '01' | '04' | '05';
   /**
-   * Nota de crédito: id de billing de la factura que se modifica. La clave de
+   * Nota de crédito o de débito: id de billing de la factura que se modifica. La clave de
    * acceso del comprobante original la resuelve fiscal (fue él quien la generó);
    * billing no la conoce.
    */

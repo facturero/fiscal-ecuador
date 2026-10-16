@@ -1,6 +1,13 @@
 import type { InvoiceIssuedPayload } from '../domain/types.js';
+import type { DirectDocumentType, DirectIssuerSnapshot, DirectPayload } from '../domain/direct-documents.js';
 import type { IssuerFiscalProfile } from '../domain/invoice-xml-builder.js';
 import type { SriAuthorizationResponse, SriReceptionResponse } from '../infrastructure/http/sri-client.js';
+
+/** Lo que se guarda en `original_payload`: el evento de billing, o el comprobante que fiscal emitió directamente. */
+export type StoredPayload = InvoiceIssuedPayload | DirectPayload;
+
+/** De dónde viene el comprobante: un evento de billing, o una emisión directa en fiscal (retención, guía). */
+export type FiscalSource = 'billing' | 'fiscal';
 
 export type FiscalStatus = 'pending' | 'sent' | 'authorized' | 'rejected' | 'error';
 
@@ -8,8 +15,9 @@ export interface FiscalInvoiceRecord {
   id: string;
   organization_id: string;
   billing_invoice_id: string;
-  /** Código SRI del comprobante ('01' factura, '04' nota de crédito). */
+  /** Código SRI del comprobante ('01' factura, '04' nota de crédito, '05' nota de débito, '06' guía, '07' retención). */
   document_type: string;
+  source: FiscalSource;
   number: string;
   access_key: string | null;
   status: FiscalStatus;
@@ -20,7 +28,7 @@ export interface FiscalInvoiceRecord {
   authorized_xml_file_id: string | null;
   retry_count: number;
   last_error: string | null;
-  original_payload: InvoiceIssuedPayload | null;
+  original_payload: StoredPayload | null;
   next_check_at: Date | null;
   billing_voided_at: Date | null;
   created_at: Date;
@@ -47,6 +55,21 @@ export interface FiscalInvoiceStore {
   save(record: FiscalInvoiceRecord, event?: FiscalEvent): Promise<void>;
   findDue(status: FiscalStatus, now: Date, limit: number): Promise<FiscalInvoiceRecord[]>;
   findStalePending(updatedBefore: Date, limit: number): Promise<FiscalInvoiceRecord[]>;
+}
+
+/** Emisión de comprobantes propios de fiscal: reserva el número y crea el registro de forma atómica. */
+export interface DirectDocumentStore {
+  /**
+   * Reserva el siguiente secuencial de la serie (organización + establecimiento + punto + tipo) y crea el registro con él, todo en una
+   * transacción: si algo falla no queda un número quemado ni un registro sin número. `build` recibe los 9 dígitos del secuencial.
+   */
+  createNumbered(input: {
+    organizationId: string;
+    establishmentCode: string;
+    emissionPointCode: string;
+    documentType: DirectDocumentType;
+    build(sequentialNumber: string): FiscalInvoiceRecord;
+  }): Promise<FiscalInvoiceRecord>;
 }
 
 export interface SigningCertificate {
@@ -84,6 +107,15 @@ export interface FiscalCatalogs {
   taxCodesById(countryCode: string): Promise<Record<string, string> | undefined>;
   identificationTypeCode(countryCode: string, identificationTypeId: string): Promise<string | undefined>;
   issuerProfile(organizationId: string): Promise<IssuerFiscalProfile>;
+}
+
+/**
+ * Quién emite y desde dónde: la razón social y el RUC de la organización, y los códigos de establecimiento y punto de emisión
+ * elegidos. Billing los resuelve al emitir facturas; los comprobantes propios de fiscal los piden aquí. Lanza
+ * `FiscalValidationError` si falta algo (organización sin RUC, establecimiento o punto inexistente o inactivo).
+ */
+export interface IssuerDirectory {
+  resolve(organizationId: string, establishmentId: string, emissionPointId: string): Promise<DirectIssuerSnapshot>;
 }
 
 export interface SriGateway {

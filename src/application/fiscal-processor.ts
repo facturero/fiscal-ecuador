@@ -6,6 +6,10 @@ import { validateInvoiceForSri } from '../domain/invoice-validation.js';
 import { buildAccessKey, numericCodeFor } from '../domain/access-key.js';
 import { buildInvoiceXml } from '../domain/invoice-xml-builder.js';
 import { buildCreditNoteXml } from '../domain/credit-note-xml-builder.js';
+import { buildDebitNoteXml } from '../domain/debit-note-xml-builder.js';
+import { buildWithholdingXml } from '../domain/withholding-xml-builder.js';
+import { buildDeliveryGuideXml } from '../domain/delivery-guide-xml-builder.js';
+import { isDirectDocumentType, type DirectPayload } from '../domain/direct-documents.js';
 import { ecuadorToday } from '../domain/ecuador-time.js';
 import { describeMessages, isAlreadyReceived, SriUnavailableError } from '../infrastructure/http/sri-client.js';
 import type {
@@ -36,6 +40,17 @@ export const RETRY_POLICY = {
 
 export function backoffDelayMs(attempt: number): number {
   return Math.min(RETRY_POLICY.maxDelayMs, RETRY_POLICY.baseDelayMs * 2 ** Math.max(0, attempt));
+}
+
+/** Nombre de archivo según el tipo de comprobante. */
+export function documentFileLabel(documentType: string): string {
+  switch (documentType) {
+    case '04': return 'nota-credito';
+    case '05': return 'nota-debito';
+    case '06': return 'guia-remision';
+    case '07': return 'retencion';
+    default: return 'factura';
+  }
 }
 
 /** Estados en los que el comprobante ya está en manos del SRI o terminado. */
@@ -88,6 +103,72 @@ export class FiscalInvoiceProcessor {
     }
   }
 
+  /**
+   * Lleva al SRI un comprobante que fiscal emite directamente (retención o guía de remisión). El registro ya existe —lo creó la
+   * emisión junto con su número— y trae el payload completo. Igual que con las facturas es idempotente y reutiliza la clave de
+   * acceso si ya se había intentado.
+   */
+  async processDirect(record: FiscalInvoiceRecord, options: { manual?: boolean } = {}): Promise<FiscalInvoiceRecord> {
+    const payload = record.original_payload;
+    if (!payload || !isDirectDocumentType((payload as { documentTypeCode?: string }).documentTypeCode)) {
+      return this.fail(record, new FiscalValidationError('El registro no guarda los datos del comprobante y no se puede enviar'));
+    }
+    if (SETTLED.has(record.status)) {
+      this.log.log(`[fiscal-ecuador] Comprobante ${record.number} ya procesado (status=${record.status})`);
+      return record;
+    }
+    if (options.manual) record.retry_count = 0;
+
+    try {
+      return await this.emitDirect(record, payload as DirectPayload);
+    } catch (err) {
+      return this.fail(record, err);
+    }
+  }
+
+  /** Reintento (manual o automático) de un registro en error, sea de billing o emitido aquí. */
+  async retry(record: FiscalInvoiceRecord, options: { manual?: boolean } = {}): Promise<FiscalInvoiceRecord | null> {
+    const payload = record.original_payload;
+    if (!payload) return null;
+    if (isDirectDocumentType((payload as { documentTypeCode?: string }).documentTypeCode)) return this.processDirect(record, options);
+    return this.processIssued(payload as InvoiceIssuedPayload, options);
+  }
+
+  private async emitDirect(record: FiscalInvoiceRecord, payload: DirectPayload): Promise<FiscalInvoiceRecord> {
+    const { deps } = this;
+    const issuer = payload.issuerSnapshot;
+    if (!issuer.establishmentCode || !issuer.emissionPointCode) {
+      throw new FiscalValidationError('El comprobante no trae el código de establecimiento o de punto de emisión');
+    }
+    const issueDate = new Date(payload.issueDate);
+    if (Number.isNaN(issueDate.getTime())) throw new FiscalValidationError(`Fecha de emisión inválida: "${payload.issueDate}"`);
+
+    record.access_key = buildAccessKey({
+      issueDate,
+      documentTypeCode: payload.documentTypeCode,
+      issuerRuc: issuer.taxId,
+      environment: deps.environment,
+      establishmentCode: issuer.establishmentCode,
+      emissionPointCode: issuer.emissionPointCode,
+      sequentialNumber: payload.sequentialNumber,
+      numericCode: numericCodeFor(payload.invoiceId),
+    });
+
+    const issuerProfile = await deps.catalogs.issuerProfile(payload.organizationId);
+    const common = { accessKey: record.access_key, environment: deps.environment, issueDate, issuerProfile };
+    const unsignedXml = payload.documentTypeCode === '07'
+      ? buildWithholdingXml({ ...common, payload })
+      : buildDeliveryGuideXml({ ...common, payload });
+
+    return this.signAndSend(record, {
+      organizationId: payload.organizationId,
+      resourceId: payload.invoiceId,
+      number: payload.number,
+      docType: payload.documentTypeCode,
+      unsignedXml,
+    });
+  }
+
   private async emit(record: FiscalInvoiceRecord, payload: InvoiceIssuedPayload): Promise<FiscalInvoiceRecord> {
     const { deps } = this;
 
@@ -122,22 +203,22 @@ export class FiscalInvoiceProcessor {
       );
     }
 
-    // Una nota de crédito necesita la factura que modifica: sin ella no hay a qué
-    // acreditar los valores. El original pudo haber llegado por un evento anterior;
-    // fiscal es quien tiene su clave de acceso.
+    // Una nota de crédito o de débito necesita el comprobante que modifica: sin él no hay a qué acreditar ni a qué cargar los valores.
+    // El original pudo haber llegado por un evento anterior; fiscal es quien tiene su clave de acceso.
     let modified: { documentType: string; number: string; issueDate: string } | undefined;
-    if (docType === '04') {
-      this.validateCreditNoteRefs(payload);
+    if (docType === '04' || docType === '05') {
+      const noteName = docType === '04' ? 'nota de crédito' : 'nota de débito';
+      this.validateNoteRefs(payload, docType);
       const original = await deps.store.findByBillingInvoiceId(payload.relatedInvoiceId!);
       if (!original) {
-        throw new FiscalValidationError('La factura que modifica esta nota de crédito no tiene comprobante fiscal en este sistema');
+        throw new FiscalValidationError(`La factura que modifica esta ${noteName} no tiene comprobante fiscal en este sistema`);
       }
       if (!original.access_key) {
-        throw new FiscalValidationError('La factura que modifica esta nota de crédito aún no tiene clave de acceso: todavía no se envió al SRI');
+        throw new FiscalValidationError(`La factura que modifica esta ${noteName} aún no tiene clave de acceso: todavía no se envió al SRI`);
       }
       const originalIssueDate = payload.relatedIssueDate ?? (original.original_payload?.issueDate as string | undefined) ?? null;
       if (!originalIssueDate) {
-        throw new FiscalValidationError('La nota de crédito no indica la fecha de emisión del comprobante que modifica');
+        throw new FiscalValidationError(`La ${noteName} no indica la fecha de emisión del comprobante que modifica`);
       }
       modified = {
         documentType: original.document_type ?? '01',
@@ -145,17 +226,6 @@ export class FiscalInvoiceProcessor {
         number: original.number,
         issueDate: originalIssueDate,
       };
-    }
-
-    const certificate = await this.pickCertificate(payload.organizationId);
-    const p12 = await deps.documents.download(certificate.p12FileId);
-    if (p12.length === 0) throw new Error('El archivo del certificado está vacío');
-
-    let password: string;
-    try {
-      password = deps.decryptPassword(certificate.passwordEncrypted);
-    } catch {
-      throw new FiscalValidationError('No se pudo descifrar la contraseña del certificado: vuelve a subirlo');
     }
 
     // El código del tipo de identificación viene en la foto del cliente. El id
@@ -172,32 +242,53 @@ export class FiscalInvoiceProcessor {
       deps.catalogs.issuerProfile(payload.organizationId),
     ]);
 
+    const common = {
+      payload,
+      accessKey: record.access_key,
+      environment: deps.environment,
+      issueDate,
+      establishmentCode: issuer.establishmentCode,
+      emissionPointCode: issuer.emissionPointCode,
+      sequentialNumber: payload.sequentialNumber,
+      taxCodeById,
+      identificationTypeCode,
+      issuerProfile,
+    };
     const unsignedXml = docType === '04'
-      ? buildCreditNoteXml({
-          payload,
-          accessKey: record.access_key,
-          environment: deps.environment,
-          issueDate,
-          establishmentCode: issuer.establishmentCode,
-          emissionPointCode: issuer.emissionPointCode,
-          sequentialNumber: payload.sequentialNumber,
-          taxCodeById,
-          identificationTypeCode,
-          issuerProfile,
-          modified: modified!,
-        })
-      : buildInvoiceXml({
-          payload,
-          accessKey: record.access_key,
-          environment: deps.environment,
-          issueDate,
-          establishmentCode: issuer.establishmentCode,
-          emissionPointCode: issuer.emissionPointCode,
-          sequentialNumber: payload.sequentialNumber,
-          taxCodeById,
-          identificationTypeCode,
-          issuerProfile,
-        });
+      ? buildCreditNoteXml({ ...common, modified: modified! })
+      : docType === '05'
+        ? buildDebitNoteXml({ ...common, modified: modified! })
+        : buildInvoiceXml(common);
+
+    return this.signAndSend(record, {
+      organizationId: payload.organizationId,
+      resourceId: payload.invoiceId,
+      number: payload.number,
+      docType,
+      unsignedXml,
+    });
+  }
+
+  /**
+   * Del XML sin firmar a la recepción del SRI: elige el certificado, firma, guarda el XML firmado y lo envía. Es común a todos los
+   * comprobantes (facturas y notas de billing, y retenciones y guías emitidas aquí): solo cambia cómo se arma el XML.
+   */
+  private async signAndSend(
+    record: FiscalInvoiceRecord,
+    ctx: { organizationId: string; resourceId: string; number: string; docType: string; unsignedXml: string },
+  ): Promise<FiscalInvoiceRecord> {
+    const { deps } = this;
+    const { unsignedXml } = ctx;
+    const certificate = await this.pickCertificate(ctx.organizationId);
+    const p12 = await deps.documents.download(certificate.p12FileId);
+    if (p12.length === 0) throw new Error('El archivo del certificado está vacío');
+
+    let password: string;
+    try {
+      password = deps.decryptPassword(certificate.passwordEncrypted);
+    } catch {
+      throw new FiscalValidationError('No se pudo descifrar la contraseña del certificado: vuelve a subirlo');
+    }
 
     let signedXml: string;
     try {
@@ -210,16 +301,16 @@ export class FiscalInvoiceProcessor {
     try {
       record.signed_xml_file_id = await deps.documents.upload({
         resourceType: 'fiscal_invoice',
-        organizationId: payload.organizationId,
-        resourceId: payload.invoiceId,
+        organizationId: ctx.organizationId,
+        resourceId: ctx.resourceId,
         category: 'comprobante-firmado',
-        originalName: `${docType === '04' ? 'nota-credito' : 'factura'}-${payload.number}-firmado.xml`,
+        originalName: `${documentFileLabel(ctx.docType)}-${ctx.number}-firmado.xml`,
         mimeType: 'application/xml',
         buffer: Buffer.from(signedXml, 'utf-8'),
       });
     } catch (err) {
       // No bloquea: el comprobante legal es el autorizado, que se guarda después.
-      this.log.warn(`[fiscal-ecuador] No se pudo guardar el XML firmado de ${payload.number}: ${(err as Error).message}`);
+      this.log.warn(`[fiscal-ecuador] No se pudo guardar el XML firmado de ${ctx.number}: ${(err as Error).message}`);
     }
 
     record.status = 'pending';
@@ -241,7 +332,7 @@ export class FiscalInvoiceProcessor {
         : 'El SRI ya tenía este comprobante; se consulta su autorización';
       await deps.store.save(record, { type: 'sent', message, requiresAttention: false });
 
-      const gap = await this.sequenceGapNote(payload.organizationId, payload.number, docType);
+      const gap = await this.sequenceGapNote(ctx.organizationId, ctx.number, ctx.docType);
       if (gap) {
         this.log.warn(`[fiscal-ecuador] ${gap}`);
         // Solo auditoría: los huecos se dan de una en una y no requieren a nadie
@@ -343,12 +434,15 @@ export class FiscalInvoiceProcessor {
     return `Secuencial ${prev.number} → ${number}: se saltaron ${missing} número(s) de la serie sin comprobante que lo explique`;
   }
 
-  /** La referencia al comprobante que una nota de crédito modifica y su motivo. */
-  private validateCreditNoteRefs(payload: InvoiceIssuedPayload): void {
+  /**
+   * La referencia al comprobante que una nota modifica. La nota de crédito además exige su motivo; la de débito lleva sus motivos
+   * como líneas (cada una es un `motivo` del XML) y no tiene motivo general.
+   */
+  private validateNoteRefs(payload: InvoiceIssuedPayload, docType: '04' | '05'): void {
     if (!payload.relatedInvoiceId) {
-      throw new FiscalValidationError('La nota de crédito no indica la factura que modifica (relatedInvoiceId)');
+      throw new FiscalValidationError(`La nota de ${docType === '04' ? 'crédito' : 'débito'} no indica la factura que modifica (relatedInvoiceId)`);
     }
-    if (!payload.creditNoteReason?.trim()) {
+    if (docType === '04' && !payload.creditNoteReason?.trim()) {
       throw new FiscalValidationError('El motivo de la nota de crédito no puede estar vacío');
     }
   }
@@ -389,7 +483,7 @@ export class FiscalInvoiceProcessor {
             organizationId: record.organization_id,
             resourceId: record.billing_invoice_id,
             category: 'comprobante-autorizado',
-            originalName: `factura-${record.number}-autorizado.xml`,
+            originalName: `${documentFileLabel(record.document_type)}-${record.number}-autorizado.xml`,
             mimeType: 'application/xml',
             buffer: Buffer.from(xmlAutorizado, 'utf-8'),
           });
@@ -450,13 +544,13 @@ export class FiscalInvoiceProcessor {
     const errors = await store.findDue('error', now, limit);
     for (const record of errors) {
       if (!record.original_payload) continue;
-      await this.safely(record, () => this.processIssued(record.original_payload!));
+      await this.safely(record, () => this.retry(record));
     }
 
     const stale = await store.findStalePending(new Date(now.getTime() - RETRY_POLICY.stalePendingMs), limit);
     for (const record of stale) {
       if (!record.original_payload) continue;
-      await this.safely(record, () => this.processIssued(record.original_payload!));
+      await this.safely(record, () => this.retry(record));
     }
 
     return { authorizations: sent.length, retries: errors.length, stale: stale.length };
@@ -521,6 +615,7 @@ export class FiscalInvoiceProcessor {
       organization_id: payload.organizationId,
       billing_invoice_id: payload.invoiceId,
       document_type: documentTypeOf(payload),
+      source: 'billing',
       number: payload.number,
       access_key: null,
       status: 'pending',

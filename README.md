@@ -111,6 +111,31 @@ que el test acepta. `SRI_E2E_RUC=<ruc registrado>` exige que la reciba.
 Los tests marcados `FALLO CONOCIDO` (`it.fails` / `test.fail`) pasan mientras el
 fallo exista; cuando se arregle, fallarán y hay que quitar la marca.
 
+## Nota de débito, retención y guía de remisión (Fase 1.4 del plan ERP)
+
+Construido y verificado en local, **sin desplegar**. Cada comprobante se valida contra su XSD oficial del SRI en CI (`test-resources/sri-xsd/`): nota de débito v1.0.0, comprobante de retención v2.0.0 y guía de remisión v1.1.0.
+
+| Comprobante | Quién lo origina | Numeración |
+|---|---|---|
+| Nota de débito (05) | **billing** (`POST /invoices/:id/debit-note`); fiscal la recibe por `billing.invoice.issued` con `documentTypeCode: '05'` | la de billing (serie propia del tipo 05) |
+| Retención (07) | **fiscal** (`POST /fiscal/withholdings`, permiso `withholding:issue`) | `fiscal_sequences` (serie 07 por organización + establecimiento + punto) |
+| Guía de remisión (06) | **fiscal** (`POST /fiscal/delivery-guides`, permiso `delivery_guide:issue`) | `fiscal_sequences` (serie 06) |
+
+**Cómo funciona lo propio de fiscal.** `DirectDocumentIssuer` valida los datos, resuelve al emisor en organization-service (`HttpIssuerDirectory`), **reserva el número y crea el registro en una sola transacción** (`INSERT … ON DUPLICATE KEY UPDATE` + `SELECT … FOR UPDATE`; 30 emisiones simultáneas dan 30 números seguidos sin interbloqueos) y entrega el comprobante al mismo procesador que las facturas (`signAndSend`: certificado, firma XAdES, recepción, autorización, reintentos, huecos de secuencia). El registro va en `fiscal_invoices` con `source = 'fiscal'` y `billing_invoice_id` = su propio id; `original_payload` guarda el comprobante completo (sin él no hay reintento ni RIDE). El reintento y el trabajo de reconciliación despachan por tipo (`FiscalInvoiceProcessor.retry`).
+
+**Datos que no son del cliente.** Lo retenido (`base × porcentaje`, mitad hacia arriba, con enteros) lo calcula el servidor; el cliente nunca manda `valorRetenido`. Se rechaza antes de reservar número: base mayor que el subtotal (renta), que el IVA (IVA) o que el total (ISD); total del sustento que no es subtotal + impuestos; traslado que empieza antes de hoy; porcentaje con más de tres cifras (límite del esquema).
+
+**Evento contable.** Al **autorizarse** una retención se publica `fiscal.ec.withholding.issued` (renta, IVA e ISD retenidos, proveedor y sustento; sin datos de contacto). `accounting-service` lo asienta: Dr proveedores / Cr retenciones por pagar. Una retención que se crea pero no se autoriza no genera asiento.
+
+**RIDE** propio de cada tipo (`direct-ride-pdf.ts`), solo para comprobantes autorizados. Listado: `GET /fiscal-invoices?document_type=07&source=fiscal` (con `summary`; el detalle trae el `payload`). Catálogos de apoyo para los formularios: `GET /fiscal/withholding-codes`.
+
+**Límites conocidos.**
+- Solo pagos **locales** en la retención (`pagoLocExt = 01`): los pagos al exterior exigen régimen, país y convenio de doble tributación.
+- Los códigos de retención y de sustento que ofrece el formulario son una **ayuda** (`direct-documents.ts`): la tabla oficial cambia por resolución; el sistema no impide otro código y el SRI lo valida al recibir. Que un contador la revise antes de producción.
+- No se detecta una segunda retención sobre el mismo comprobante de sustento del mismo proveedor (el SRI sí las acepta distintas).
+- No hay anulación de retenciones ni guías desde el CRM: se anulan en SRI en línea.
+- Como todo el servicio, nada se ha autorizado jamás por el SRI real: falta RUC y certificado acreditado.
+
 ## Pendiente
 
 Ver `FACTURACION-BRECHAS.md` en la raíz del proyecto: RIDE (PDF), notas de

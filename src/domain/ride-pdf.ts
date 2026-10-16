@@ -17,6 +17,9 @@ import QRCode from 'qrcode';
 export const DOCUMENT_NAMES: Record<string, string> = {
   '01': 'FACTURA',
   '04': 'NOTA DE CRÉDITO',
+  '05': 'NOTA DE DÉBITO',
+  '06': 'GUÍA DE REMISIÓN',
+  '07': 'COMPROBANTE DE RETENCIÓN',
 };
 
 export interface RidePdfLine {

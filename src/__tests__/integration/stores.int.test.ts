@@ -18,6 +18,7 @@ function record(overrides: Partial<FiscalInvoiceRecord> = {}): FiscalInvoiceReco
     organization_id: 'org-it',
     billing_invoice_id: randomUUID(),
     document_type: '01',
+    source: 'billing',
     number: `001-001-${String(Math.floor(Math.random() * 1e9)).padStart(9, '0')}`,
     access_key: null,
     status: 'pending',

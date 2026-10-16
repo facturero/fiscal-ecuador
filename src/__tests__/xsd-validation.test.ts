@@ -4,9 +4,10 @@ import { resolve } from 'node:path';
 import { validateXML } from 'xmllint-wasm';
 import { buildInvoiceXml, type InvoiceXmlInput } from '../domain/invoice-xml-builder.js';
 import { buildCreditNoteXml } from '../domain/credit-note-xml-builder.js';
+import { buildDebitNoteXml } from '../domain/debit-note-xml-builder.js';
 import { signXmlWithP12 } from '../domain/xml-signer.js';
 import type { InvoiceIssuedPayload } from '../domain/types.js';
-import { sampleInvoice, selfSignedP12, TAX_CODES } from './fixtures.js';
+import { sampleDebitNote, sampleInvoice, selfSignedP12, TAX_CODES } from './fixtures.js';
 
 /**
  * El XML que generamos, validado contra los XSD OFICIALES del SRI (factura
@@ -18,6 +19,7 @@ const XSD_DIR = resolve(import.meta.dirname, '../../test-resources/sri-xsd');
 const read = (name: string) => readFileSync(resolve(XSD_DIR, name), 'utf8');
 const FACTURA_XSD = read('factura_V2.1.0.xsd');
 const NOTA_CREDITO_XSD = read('notaCredito_V1.1.0.xsd');
+const NOTA_DEBITO_XSD = read('notaDebito_V1.0.0.xsd');
 const XMLDSIG_XSD = read('xmldsig-core-schema.xsd');
 
 async function validateWith(xsd: string, xml: string): Promise<{ valid: boolean; errors: string[] }> {
@@ -74,6 +76,23 @@ function buildCreditNote(overrides: Partial<InvoiceIssuedPayload> = {}): string 
   });
 }
 
+/** Una nota de débito con dos motivos sobre la factura 001-001-000000123. */
+function buildDebitNote(overrides: Partial<InvoiceIssuedPayload> = {}, issuerProfile?: Parameters<typeof buildDebitNoteXml>[0]['issuerProfile']): string {
+  return buildDebitNoteXml({
+    payload: sampleDebitNote(overrides),
+    accessKey: '1309202601179217560600110010050000001251234567815',
+    environment: 'pruebas',
+    issueDate: new Date('2026-09-13T18:00:00.000Z'),
+    establishmentCode: '001',
+    emissionPointCode: '001',
+    sequentialNumber: '000000125',
+    taxCodeById: TAX_CODES,
+    identificationTypeCode: 'RUC',
+    issuerProfile,
+    modified: { documentType: '01', number: '001-001-000000123', issueDate: '2026-09-13T17:30:00.000Z' },
+  });
+}
+
 describe('XSD oficial del SRI (factura v2.1.0)', () => {
   it('la herramienta acepta el XML de ejemplo del propio SRI', async () => {
     expect(await validate(read('factura_V2.1.0.xml'))).toEqual({ valid: true, errors: [] });
@@ -121,6 +140,53 @@ describe('XSD oficial del SRI (factura v2.1.0)', () => {
 
     it('el número del comprobante modificado debe ser el número, no la clave de acceso', async () => {
       expect((await validateWith(NOTA_CREDITO_XSD, buildCreditNote().replace('<numDocModificado>001-001-000000123</numDocModificado>', `<numDocModificado>${KEY}</numDocModificado>`))).valid).toBe(false);
+    });
+  });
+
+  describe('nota de débito (XSD oficial v1.0.0)', () => {
+    it('nuestra nota de débito sin firmar es válida', async () => {
+      expect(await validateWith(NOTA_DEBITO_XSD, buildDebitNote())).toEqual({ valid: true, errors: [] });
+    });
+
+    it('nuestra nota de débito firmada (con ds:Signature) es válida', async () => {
+      const p12 = selfSignedP12();
+      const { signedXml } = signXmlWithP12(buildDebitNote(), p12.buffer, p12.password);
+      expect(await validateWith(NOTA_DEBITO_XSD, signedXml)).toEqual({ valid: true, errors: [] });
+    });
+
+    it('con todos los opcionales del emisor y un solo motivo sin IVA es válida', async () => {
+      const xml = buildDebitNote(
+        {
+          subtotalCents: 10_00, taxTotalCents: 0, totalCents: 10_00,
+          lines: sampleDebitNote().lines.slice(0, 1),
+        },
+        { contribuyenteRimpe: 'CONTRIBUYENTE RÉGIMEN RIMPE', agenteRetencion: '1', contribuyenteEspecial: '5368', dirMatriz: 'Av. 10 de Agosto y Colón, Quito', obligadoContabilidad: 'NO', defaultPaymentMethodCode: '20' },
+      );
+      expect(await validateWith(NOTA_DEBITO_XSD, xml)).toEqual({ valid: true, errors: [] });
+    });
+
+    it('a consumidor final, y con caracteres especiales en la razón, es válida', async () => {
+      const payload = sampleDebitNote({ customerSnapshot: null });
+      payload.lines[0]!.description = 'Intereses "por mora" <30 días> & recargo';
+      expect(await validateWith(NOTA_DEBITO_XSD, buildDebitNote(payload))).toEqual({ valid: true, errors: [] });
+    });
+
+    it('lleva motivos, no detalles, y los impuestos agrupados', () => {
+      const xml = buildDebitNote();
+      expect(xml).toContain('<motivos>');
+      expect(xml).not.toContain('<detalles>');
+      expect(xml).toContain('<razon>Intereses por mora</razon>');
+      expect(xml).toContain('<valorTotal>14.60</valorTotal>');
+      expect((xml.match(/<impuesto>/g) ?? []).length).toBe(2);
+    });
+
+    it('el número del comprobante modificado debe ser el número, no la clave de acceso', async () => {
+      expect((await validateWith(NOTA_DEBITO_XSD, buildDebitNote().replace('<numDocModificado>001-001-000000123</numDocModificado>', `<numDocModificado>${KEY}</numDocModificado>`))).valid).toBe(false);
+    });
+
+    it('un nodo fuera de su orden o un motivo vacío lo rechaza el esquema', async () => {
+      expect((await validateWith(NOTA_DEBITO_XSD, buildDebitNote().replace('<valorTotal>14.60</valorTotal>', '').replace('<impuestos>', '<valorTotal>14.60</valorTotal><impuestos>'))).valid).toBe(false);
+      expect((await validateWith(NOTA_DEBITO_XSD, buildDebitNote().replace('<razon>Intereses por mora</razon>', '<razon></razon>'))).valid).toBe(false);
     });
   });
 

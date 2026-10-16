@@ -15,6 +15,11 @@ import { sequelize } from '../../infrastructure/persistence/sequelize.js';
 import { recordAuditEvent } from '../../infrastructure/messaging/audit-outbox.js';
 import { certificateRevokedEvent, certificateUploadedEvent, invoiceRetryRequestedEvent } from '../../domain/audit-events.js';
 import type { DocumentStore, FiscalInvoiceRecord } from '../../application/ports.js';
+import { documentFileLabel } from '../../application/fiscal-processor.js';
+import type { DirectDocumentIssuer } from '../../application/direct-document-issuer.js';
+import { isDirectDocumentType, type DeliveryGuidePayload, type DirectPayload, type WithholdingPayload } from '../../domain/direct-documents.js';
+import { renderDeliveryGuideRide, renderWithholdingRide } from '../../domain/direct-ride-pdf.js';
+import { directRoutes } from './direct-routes.js';
 
 type Vars = { Variables: ContextVariables };
 
@@ -23,9 +28,39 @@ export interface AppDependencies {
   documents: DocumentStore;
   /** Reprocesa una factura en error a partir de los datos que guardó. */
   onRetry?: (billingInvoiceId: string) => Promise<FiscalInvoiceRecord | null>;
+  /** Emisión de retenciones y guías de remisión. Sin él esas rutas no se montan. */
+  issuer?: DirectDocumentIssuer;
 }
 
 const STATUSES = ['pending', 'sent', 'authorized', 'rejected', 'error'] as const;
+const DOCUMENT_TYPES = ['01', '04', '05', '06', '07'] as const;
+const SOURCES = ['billing', 'fiscal'] as const;
+
+/** Lo mínimo de un comprobante propio de fiscal para pintar una fila de listado, sin arrastrar el payload entero. */
+function directSummary(payload: unknown) {
+  const p = payload as DirectPayload | null;
+  if (!p || !isDirectDocumentType(p.documentTypeCode)) return null;
+  if (p.documentTypeCode === '07') {
+    return {
+      kind: 'withholding' as const,
+      subject_name: p.subject.businessName,
+      subject_identification: p.subject.identification,
+      support_number: p.support.number,
+      support_issue_date: p.support.issueDate,
+      fiscal_period: p.fiscalPeriod,
+      total_withheld_cents: p.totalWithheldCents,
+    };
+  }
+  return {
+    kind: 'delivery_guide' as const,
+    carrier_name: p.carrier.businessName,
+    plate: p.carrier.plate,
+    transport_start: p.transportStart,
+    transport_end: p.transportEnd,
+    recipients_count: p.recipients.length,
+    first_recipient: p.recipients[0]?.businessName ?? null,
+  };
+}
 
 function toCertificateDTO(cert: CertificateModel) {
   return {
@@ -44,11 +79,15 @@ function toCertificateDTO(cert: CertificateModel) {
  * respuesta cruda del SRI. Los nombres siguen en snake_case porque es lo que ya
  * consumen el frontend y los tests e2e.
  */
-function toFiscalInvoiceDTO(invoice: FiscalInvoiceModel | FiscalInvoiceRecord) {
+function toFiscalInvoiceDTO(invoice: FiscalInvoiceModel | FiscalInvoiceRecord, options: { full?: boolean } = {}) {
   const sri = (invoice.sri_response ?? null) as { mensajes?: unknown[]; xmlAutorizado?: string } | null;
   return {
     id: invoice.id,
     billing_invoice_id: invoice.billing_invoice_id,
+    /** Código SRI del comprobante: 01 factura, 04 nota de crédito, 05 nota de débito, 06 guía de remisión, 07 retención. */
+    document_type: invoice.document_type,
+    /** `billing` si llegó por un evento de billing; `fiscal` si se emitió aquí (retención, guía). */
+    source: invoice.source,
     number: invoice.number,
     access_key: invoice.access_key,
     status: invoice.status,
@@ -63,6 +102,9 @@ function toFiscalInvoiceDTO(invoice: FiscalInvoiceModel | FiscalInvoiceRecord) {
     has_authorized_xml: Boolean(invoice.authorized_xml_file_id || sri?.xmlAutorizado),
     // El RIDE se genera al vuelo y requiere autorización + datos para armarlo.
     ride_available: invoice.status === 'authorized' && Boolean(invoice.access_key && invoice.original_payload),
+    summary: invoice.source === 'fiscal' ? directSummary(invoice.original_payload) : null,
+    // El comprobante completo solo en el detalle: un listado de 100 guías con sus mercaderías pesaría de más.
+    ...(options.full && invoice.source === 'fiscal' ? { payload: invoice.original_payload } : {}),
     created_at: invoice.created_at,
     updated_at: invoice.updated_at,
   };
@@ -84,6 +126,8 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
     async (c) => {
       const orgId = c.get('organizationId');
       const status = c.req.query('status');
+      const documentType = c.req.query('document_type');
+      const source = c.req.query('source');
       const page = Math.max(1, Number.parseInt(c.req.query('page') ?? '1', 10) || 1);
       const pageSize = Math.min(100, Math.max(1, Number.parseInt(c.req.query('pageSize') ?? '20', 10) || 20));
 
@@ -91,14 +135,26 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
         return c.json({ code: 'BadRequestError', message: `Estado desconocido: ${status}` }, 400);
       }
 
-      const where: WhereOptions = { organization_id: orgId, ...(status ? { status } : {}) };
+      if (documentType && !(DOCUMENT_TYPES as readonly string[]).includes(documentType)) {
+        return c.json({ code: 'BadRequestError', message: `Tipo de comprobante desconocido: ${documentType}` }, 400);
+      }
+      if (source && !(SOURCES as readonly string[]).includes(source)) {
+        return c.json({ code: 'BadRequestError', message: `Origen desconocido: ${source}` }, 400);
+      }
+
+      const where: WhereOptions = {
+        organization_id: orgId,
+        ...(status ? { status } : {}),
+        ...(documentType ? { document_type: documentType } : {}),
+        ...(source ? { source } : {}),
+      };
       const { rows, count } = await FiscalInvoiceModel.findAndCountAll({
         where,
         order: [['created_at', 'DESC']],
         limit: pageSize,
         offset: (page - 1) * pageSize,
       });
-      return c.json({ items: rows.map(toFiscalInvoiceDTO), total: count, page, pageSize });
+      return c.json({ items: rows.map((row) => toFiscalInvoiceDTO(row)), total: count, page, pageSize });
     },
   );
 
@@ -136,7 +192,7 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
         where: { billing_invoice_id: billingInvoiceId, organization_id: orgId },
       });
       if (!invoice) return c.json({ code: 'NotFoundError', message: 'Factura fiscal no encontrada' }, 404);
-      return c.json(toFiscalInvoiceDTO(invoice));
+      return c.json(toFiscalInvoiceDTO(invoice, { full: true }));
     },
   );
 
@@ -181,7 +237,7 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
         return c.json({ code: 'NotReadyError', message: 'XML aún no disponible' }, 404);
       }
 
-      const filename = `factura-${invoice.number}-${kind}.xml`;
+      const filename = `${documentFileLabel(invoice.document_type)}-${invoice.number}-${kind}.xml`;
       return new Response(new Uint8Array(body), {
         headers: {
           'Content-Type': 'application/xml; charset=utf-8',
@@ -210,7 +266,9 @@ export function fiscalRoutes(deps: AppDependencies): Hono<Vars> {
         return c.json({ code: 'NotReadyError', message: 'Faltan los datos de autorización para generar el RIDE' }, 404);
       }
 
-      const pdf = await renderRidePdf(toRidePdfData(invoice));
+      const pdf = isDirectDocumentType(invoice.document_type)
+        ? await renderDirectRide(invoice)
+        : await renderRidePdf(toRidePdfData(invoice));
       const filename = `ride-${invoice.number.replace(/\s+/g, '')}.pdf`;
       return new Response(new Uint8Array(pdf), {
         headers: {
@@ -384,6 +442,21 @@ async function findOwned(id: string, organizationId: string): Promise<FiscalInvo
   return FiscalInvoiceModel.findOne({ where: { id, organization_id: organizationId } });
 }
 
+/** RIDE de una retención o una guía de remisión emitidas aquí. */
+function renderDirectRide(invoice: FiscalInvoiceModel): Promise<Buffer> {
+  const auth = {
+    number: invoice.number,
+    accessKey: invoice.access_key!,
+    authorizationNumber: invoice.authorization_number || invoice.access_key!,
+    authorizationDate: invoice.authorization_date ? invoice.authorization_date.toISOString() : null,
+    environment: config.SRI_ENVIRONMENT,
+    qrContent: rideQrUrl(invoice.access_key!, config.RIDE_QR_URL),
+  };
+  return invoice.document_type === '07'
+    ? renderWithholdingRide(invoice.original_payload as WithholdingPayload, auth)
+    : renderDeliveryGuideRide(invoice.original_payload as DeliveryGuidePayload, auth);
+}
+
 /**
  * Arma el RIDE desde lo que fiscal guardó: el payload original (datos fiscales
  * congelados al emitir) + la autorización. El QR lleva la URL configurada
@@ -443,6 +516,7 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.route('/', healthRoutes());
   app.route('/', fiscalRoutes(deps));
+  if (deps.issuer) app.route('/', directRoutes({ issuer: deps.issuer, toDto: (record) => toFiscalInvoiceDTO(record, { full: true }) }));
 
   return app;
 }

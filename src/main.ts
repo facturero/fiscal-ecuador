@@ -6,6 +6,9 @@ import { createApp } from './interface/http/app.js';
 import { OutboxRelay } from '@facturero/outbox-relay';
 import { startConsumers, reconciliationJob, processor, fiscalInvoiceStore } from './infrastructure/messaging/consumer.js';
 import { HttpDocumentStorage } from './infrastructure/http/document-storage.js';
+import { HttpIssuerDirectory } from './infrastructure/http/issuer-directory.js';
+import { SequelizeDirectDocumentStore } from './infrastructure/persistence/stores.js';
+import { DirectDocumentIssuer } from './application/direct-document-issuer.js';
 
 async function main(): Promise<void> {
   console.log('[fiscal-ecuador] config resuelta:', JSON.stringify({
@@ -25,6 +28,11 @@ async function main(): Promise<void> {
   const app = createApp({
     corsOrigin: config.CORS_ORIGIN,
     documents: new HttpDocumentStorage(config.DOCUMENT_SERVICE_URL, config.INTERNAL_SERVICE_SECRET),
+    issuer: new DirectDocumentIssuer({
+      issuers: new HttpIssuerDirectory(config.ORG_SERVICE_URL),
+      store: new SequelizeDirectDocumentStore(),
+      processor,
+    }),
     onRetry: async (billingInvoiceId: string) => {
       const record = await fiscalInvoiceStore.findByBillingInvoiceId(billingInvoiceId);
       if (!record?.original_payload) {
@@ -33,7 +41,7 @@ async function main(): Promise<void> {
           name: 'ConflictError',
         });
       }
-      return processor.processIssued(record.original_payload, { manual: true });
+      return processor.retry(record, { manual: true });
     },
   });
 
