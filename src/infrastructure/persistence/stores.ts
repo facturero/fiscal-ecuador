@@ -13,6 +13,7 @@ import type {
   StoredPayload,
 } from '../../application/ports.js';
 import type { DirectDocumentType, WithholdingPayload } from '../../domain/direct-documents.js';
+import { WITHHOLDING_ISSUED_EVENT, withholdingIssuedPayload } from '../../application/withholding-event.js';
 
 /** Aviso para la campana: una factura fiscal necesita que alguien actúe. */
 export const ATTENTION_EVENT = 'fiscal.ec.invoice.attention_required';
@@ -156,33 +157,7 @@ export class SequelizeFiscalInvoiceStore implements FiscalInvoiceStore {
   }
 }
 
-/** Retención autorizada por el SRI. Lo consume contabilidad. */
-export const WITHHOLDING_ISSUED_EVENT = 'fiscal.ec.withholding.issued';
-
-/**
- * Lo que contabilidad necesita para asentar la retención: cuánto se retuvo de cada impuesto, a quién y de qué compra. No lleva
- * el XML ni los datos de contacto del proveedor.
- */
-export function withholdingIssuedPayload(record: FiscalInvoiceRecord, payload: WithholdingPayload): Record<string, unknown> {
-  const sum = (tax: 'income' | 'vat' | 'isd') => payload.withholdings.filter((w) => w.tax === tax).reduce((total, w) => total + w.amountCents, 0);
-  return {
-    withholdingId: payload.invoiceId,
-    fiscalInvoiceId: record.id,
-    organizationId: record.organization_id,
-    number: record.number,
-    issueDate: payload.issueDate,
-    establishmentId: payload.establishmentId,
-    authorizationNumber: record.authorization_number,
-    userId: payload.userId,
-    currencyCode: 'USD',
-    supplier: { identification: payload.subject.identification, businessName: payload.subject.businessName },
-    support: { documentCode: payload.support.documentCode, number: payload.support.number, issueDate: payload.support.issueDate },
-    incomeTaxWithheldCents: sum('income'),
-    vatWithheldCents: sum('vat'),
-    isdWithheldCents: sum('isd'),
-    totalWithheldCents: payload.totalWithheldCents,
-  };
-}
+export { WITHHOLDING_ISSUED_EVENT, withholdingIssuedPayload };
 
 /**
  * Numeración y alta de los comprobantes que fiscal emite directamente. El contador y el registro nacen en la misma transacción:
