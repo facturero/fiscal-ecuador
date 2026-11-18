@@ -15,7 +15,7 @@ export class HttpIssuerDirectory implements IssuerDirectory {
   constructor(private readonly orgServiceUrl: string) {}
 
   async resolve(organizationId: string, establishmentId: string, emissionPointId: string): Promise<DirectIssuerSnapshot> {
-    const org = await this.get<{ legalName: string | null; tradeName: string | null; taxId: string | null }>(
+    const org = await this.get<{ legalName: string | null; tradeName: string | null; taxId: string | null; settings?: Record<string, unknown> | null }>(
       '/organizations/me', organizationId, 'organization:read', 'la organización',
     );
     if (!org.legalName || !org.taxId) {
@@ -43,6 +43,7 @@ export class HttpIssuerDirectory implements IssuerDirectory {
       establishmentCode: establishment.code,
       emissionPointCode: point.code,
       address: establishment.address,
+      mainAddress: typeof org.settings?.dirMatriz === 'string' ? org.settings.dirMatriz : null,
     };
   }
 

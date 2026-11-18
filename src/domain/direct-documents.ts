@@ -29,6 +29,8 @@ export interface DirectIssuerSnapshot {
   emissionPointCode: string;
   /** Dirección del establecimiento. */
   address?: string | null;
+  /** Dirección de la matriz (ajustes de la organización): la guía parte de aquí si el establecimiento no tiene dirección. */
+  mainAddress?: string | null;
 }
 
 export interface DirectDocumentBase {

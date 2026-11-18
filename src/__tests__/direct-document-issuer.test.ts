@@ -31,7 +31,8 @@ const issuers: IssuerDirectory = {
       taxId: '1792175606001',
       establishmentCode: establishmentId === 'est-2' ? '002' : '001',
       emissionPointCode: emissionPointId === 'pt-2' ? '002' : '001',
-      address: establishmentId === 'est-sin-dir' ? null : 'Av. Amazonas N34-12, Quito',
+      address: establishmentId === 'est-sin-dir' || establishmentId === 'est-matriz' ? null : 'Av. Amazonas N34-12, Quito',
+      mainAddress: establishmentId === 'est-matriz' ? 'Matriz, Av. 10 de Agosto, Quito' : null,
     };
   },
 };
@@ -210,6 +211,12 @@ describe('Guía de remisión', () => {
     const t = build();
     await expect(t.issuer.issueDeliveryGuide(ctx, guideInput(over))).rejects.toThrow(message);
     expect(t.store.records.size).toBe(0);
+  });
+
+  it('sin dirección en el establecimiento, la guía parte de la matriz de la organización', async () => {
+    const t = build();
+    const guide = await t.issuer.issueDeliveryGuide(ctx, guideInput({ establishmentId: 'est-matriz' }));
+    expect((guide.original_payload as DeliveryGuidePayload).originAddress).toBe('Matriz, Av. 10 de Agosto, Quito');
   });
 
   it('sin dirección de partida ni dirección del establecimiento no se emite', async () => {

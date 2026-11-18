@@ -159,8 +159,9 @@ export class DirectDocumentIssuer {
     });
 
     return this.create(ctx, '06', input.establishmentId, input.emissionPointId, (issuer, number, sequentialNumber, invoiceId): DeliveryGuidePayload => {
-      const originAddress = input.originAddress?.trim() || issuer.address?.trim();
-      if (!originAddress) throw new FiscalValidationError('Falta la dirección de partida: indícala o completa la dirección del establecimiento');
+      // Primero lo que se indique, luego el establecimiento y por último la matriz de la organización.
+      const originAddress = input.originAddress?.trim() || issuer.address?.trim() || issuer.mainAddress?.trim();
+      if (!originAddress) throw new FiscalValidationError('Falta la dirección de partida: indícala o completa la dirección del establecimiento o de la matriz');
       return {
         invoiceId,
         documentTypeCode: '06',
