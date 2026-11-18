@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 
 ARG NODE_AUTH_TOKEN
 
@@ -8,7 +8,7 @@ RUN printf '@facturero:registry=https://npm.pkg.github.com\n//npm.pkg.github.com
 COPY . .
 RUN npm run build
 
-FROM node:20-alpine AS runner
+FROM node:24-alpine AS runner
 WORKDIR /app
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/node_modules ./node_modules
