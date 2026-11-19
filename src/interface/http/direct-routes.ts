@@ -24,8 +24,8 @@ const text = (max: number) => z.string().trim().min(1).max(max);
 const optionalText = (max: number) => z.string().trim().max(max).nullish().transform((v) => v || null);
 
 export const withholdingSchema = z.object({
-  establishmentId: z.string().uuid(),
-  emissionPointId: z.string().uuid(),
+  establishmentId: z.string().guid(),
+  emissionPointId: z.string().guid(),
   subject: z.object({
     identificationType: z.enum(['RUC', 'CEDULA', 'PASAPORTE']),
     identification: text(20),
@@ -73,8 +73,8 @@ export const withholdingSchema = z.object({
 const partyIdentification = z.enum(['RUC', 'CEDULA', 'PASAPORTE', 'EXTERIOR']);
 
 export const deliveryGuideSchema = z.object({
-  establishmentId: z.string().uuid(),
-  emissionPointId: z.string().uuid(),
+  establishmentId: z.string().guid(),
+  emissionPointId: z.string().guid(),
   originAddress: optionalText(300),
   carrier: z.object({
     identificationType: partyIdentification,
